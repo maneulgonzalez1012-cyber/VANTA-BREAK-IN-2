@@ -2392,6 +2392,37 @@ State.Stop = function()
     print("[VANTA] detenido: movimiento, colisiones, luz y hook restaurados.")
 end
 
+-- Puerta para el loader: le dice si el script está sano y qué remotos ve.
+-- Una sola fuente de verdad, no dos listas que se desincronizan.
+State.Verify = function()
+    local expected = {
+        "GiveTool",
+        "Vending",
+        "Energy",
+        "HealTheNoobs",
+        "RainbowWhatStat",
+        "HitBadguy",
+        "IceSlip",
+    }
+
+    local missing = {}
+
+    for _, name in ipairs(expected) do
+        if not ResolveRemote("Events", name) then
+            table.insert(missing, name)
+        end
+    end
+
+    return {
+        ok = #missing == 0,
+        running = State.Running,
+        placeId = game.PlaceId,
+        expected = #expected,
+        missing = missing,
+        hooks = HookAvailable,
+    }
+end
+
 Notify(
     "VANTA cargado",
     "PlaceId " .. tostring(game.PlaceId)

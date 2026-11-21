@@ -27,6 +27,37 @@ Para probar una branch sin merge:
 loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/<branch>/loader.lua"))()
 ```
 
+## El loader
+
+La barra **no es una animación**. Cada etapa se marca cuando ocurre de verdad:
+
+| Etapa | Qué la hace pasar |
+| --- | --- |
+| `Conectar` | el loader arranca |
+| `Descargar` | llegan los KB de `VANTA.lua` (dos intentos de red) |
+| `Compilar` | `loadstring` devuelve una función |
+| `Ejecutar` | el script corre sin error |
+| `Verificar remotos` | `VANTA.lua` confirma 7/7 remotos |
+
+La verificación la hace el **propio script** a través de `State.Verify()`, no una
+copia de su lista. Una sola fuente de verdad.
+
+Cómo se ve cada final:
+
+| Situación | Marcas | Qué queda en pantalla |
+| --- | --- | --- |
+| Todo bien | ✔ ✔ ✔ ✔ ✔ | `7/7 remotos \| hooks sí` |
+| Remotos incompletos | ✔ ✔ ✔ ✔ **!** ámbar | `faltan X, Y (PlaceId ...)` |
+| Red caída | ✔ **✖** · · · | `no se pudo descargar: HttpError 502` |
+| Respuesta vacía | ✔ **✖** · · · | `no se pudo descargar: respuesta vacía` |
+| Error de sintaxis | ✔ ✔ **✖** · · | `error de sintaxis: syntax error near '='` |
+| Script falla al correr | ✔ ✔ ✔ **✖** · | `VANTA.lua falló: ...` |
+| Script corre pero no deja estado | ✔ ✔ ✔ ✔ **✖** | `corrió pero no dejó estado` |
+
+Si hay `✖`, el mensaje **se queda en pantalla** y la barra no desaparece sola.
+Un clic cierra. Un `!` ámbar significa que el script cargó pero estás en el lugar
+equivocado o el juego cambió algo.
+
 ## PlaceIds
 
 | Lugar | PlaceId |
@@ -111,7 +142,12 @@ efecto medible.
 
 ## Verificación
 
-Ejecutado completo contra un árbol de Roblox simulado con dos servidores:
+**Loader**: ejecutado contra siete escenarios (todo bien, remotos incompletos,
+red caída, respuesta vacía, error de sintaxis, error en ejecución, script sin
+estado). Cada uno termina en la etapa correcta con el mensaje correcto, y la
+GUI se destruye sin fugas.
+
+**Script**: ejecutado completo contra un árbol de Roblox simulado con dos servidores:
 
 | Servidor | Resultado |
 | --- | --- |
