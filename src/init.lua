@@ -39,6 +39,18 @@ Sections.Declare("movement", movement)
 Sections.Declare("visuals", visuals)
 Sections.Declare("lobby", lobby)
 
+-- ─── Un solo VANTA a la vez ────────────────────────────────
+-- Si ya hay una copia viva (el usuario volvió a pegar el script sin
+-- reiniciar), se apaga esa antes de montar la nueva. Si no, quedan dos
+-- ventanas, dos hooks y dos Heartbeats peleándose por el mismo personaje:
+-- tocas algo y la copia vieja lo deshace en el mismo frame.
+local previous = getgenv and getgenv().VANTA_BI2
+
+if type(previous) == "table" and type(previous.Stop) == "function" then
+    pcall(previous.Stop)
+    print("[VANTA] había una copia anterior: apagada antes de arrancar esta.")
+end
+
 -- ─── Menú ──────────────────────────────────────────────────
 
 local okLibrary, Rayfield = pcall(function()

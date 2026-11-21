@@ -178,6 +178,24 @@ end})
 GENV = {}
 getgenv = function() return GENV end
 
+-- Hook falso: guarda el envoltorio y deja invocarlo como el real.
+HOOK = {installed = 0}
+STATE_HOOK = HOOK
+function hookmetamethod(obj, name, fn)
+    HOOK.installed = HOOK.installed + 1
+    HOOK.fn = fn
+    -- El original de verdad: llamar al método directo, sin pasar por el
+    -- envoltorio (si no, `original` se vuelve a llamar a sí mismo).
+    return function(self, ...) return self.FireServer(self, ...) end
+end
+function getnamecallmethod() return HOOK.method or "FireServer" end
+function newcclosure(fn) return fn end
+-- El typeof de Luau devuelve "Instance" para instancias, no "table".
+typeof = function(v)
+    if type(v) == "table" and v.ClassName then return "Instance" end
+    return type(v)
+end
+
 local players = service("Players")
 local localPlayer = class("Player", "Tester")
 localPlayer.Character = class("Model", "Tester")
@@ -198,6 +216,7 @@ function players:GetPlayers() return {localPlayer} end
 local rs = service("ReplicatedStorage")
 local events = class("Folder", "Events")
 addChild(rs, events)
+EVENTS_FOLDER = events
 
 FIRED = {}
 
@@ -403,6 +422,59 @@ def main():
             failures.append(f"la velocidad no volvió: {speed_after}")
         if not collide_after:
             failures.append("la colisión no volvió (quedas atravesando el mapa)")
+
+    # ── hook: el interruptor tiene que sobrevivir al frame ──
+    if scenario == "hook":
+        survival = Sections.Get("survival")
+
+        ok, detail = survival.SetSemiGod(True)
+        print(f"  SetSemiGod -> {ok} | {detail}")
+
+        if not ok:
+            failures.append(f"el hook no se instaló: {detail}")
+
+        # El Heartbeat corre justo después. Si el hook se apaga aquí,
+        # el interruptor no dura ni un frame.
+        lua.execute('Work.heartbeat().Fire()')
+
+        # El hook ya no guarda copia: la bandera vive en state.
+        still = State.Get("survival.semiGod", False)
+
+        print(f"  tras un frame: semiGod={still}")
+
+        if not still:
+            failures.append("la bandera no sobrevivió al frame")
+
+        # Y la prueba de verdad: el daño no debe pasar.
+        damage = lua.execute("""
+            local energy = EVENTS_FOLDER.Children[3]
+            HOOK.method = "FireServer"
+            Work.humanoid().Health = 100
+            HOOK.fn(energy, -25, "Pizza")
+            return Work.humanoid().Health
+        """)
+
+        print(f"  vida tras Energy(-25): {damage}")
+
+        if damage != 100:
+            failures.append(f"el semi godmode no bloqueó el daño: vida {damage}")
+
+        # Apagado: el daño vuelve a entrar.
+        survival.SetSemiGod(False)
+        lua.execute('Work.heartbeat().Fire()')
+
+        damage = lua.execute("""
+            local energy = EVENTS_FOLDER.Children[3]
+            HOOK.method = "FireServer"
+            Work.humanoid().Health = 100
+            HOOK.fn(energy, -25, "Pizza")
+            return Work.humanoid().Health
+        """)
+
+        print(f"  vida tras apagar: {damage}")
+
+        if damage >= 100:
+            failures.append("al apagar el semi god el daño sigue bloqueado")
 
     # ── teardown: cerrar corta todo ──
     if scenario == "teardown":

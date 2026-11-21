@@ -2,7 +2,7 @@
 """
 VANTA — empaquetador.
 
-Convierte src/ (17 archivos, un módulo por archivo) en UN solo script
+Convierte src/ (13 módulos, un archivo por módulo) en UN solo script
 ejecutable. El resultado no es una copia mezclada: es un cargador de
 módulos que los mantiene separados en memoria.
 
@@ -20,6 +20,7 @@ Uso:
 """
 import pathlib
 import re
+import os
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -191,7 +192,20 @@ def main():
             print("  ", name)
         return 0
 
-    OUT.write_text(bundle, encoding="utf-8")
+    # Escritura atómica. Con `write_text` hay un instante en que el archivo
+    # existe pero está vacío o a medias; un test que lo lea justo en ese
+    # instante carga un bundle truncado y falla sin motivo. Se escribe al
+    # lado y se renombra de golpe: quien lea, lee la versión entera.
+    # Nombre único por proceso: con un `.tmp` fijo, dos builds a la vez se
+    # pisan el archivo temporal y uno de los dos renombra la nada.
+    temp = OUT.with_name(f"{OUT.name}.{os.getpid()}.tmp")
+
+    with open(temp, "w", encoding="utf-8") as handle:
+        handle.write(bundle)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    os.replace(temp, OUT)
 
     print(f"{OUT.name}: {len(bundle)} bytes")
     print(f"  módulos empaquetados: {len(files)}")

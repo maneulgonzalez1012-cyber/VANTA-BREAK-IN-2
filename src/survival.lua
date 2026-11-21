@@ -170,11 +170,14 @@ end
 
 -- El hook se instala UNA vez y consulta sus banderas en cada llamada.
 -- Apagar la bandera no deja un hook huérfano ni obliga a reinstalar.
+-- El hook NO guarda interruptores propios. Lee la bandera de state.lua en
+-- cada llamada. Antes tenía copias (hook.semiGod/hook.antiSlip) que el
+-- Heartbeat recalculaba con un `or`, y cualquier valor viejo pisaba el
+-- interruptor recién encendido. Una sola fuente de verdad.
 local hook = {
     installed = false,
     original = nil,
-    semiGod = false,
-    antiSlip = false,
+    self = nil,
 }
 
 local function canHook()
@@ -186,6 +189,15 @@ end
 local function installHook()
     if hook.installed then
         return true
+    end
+
+    -- Al reejecutar el script, el hook del arranque anterior sigue montado
+    -- y este módulo es nuevo. Se desmonta el viejo antes de poner el nuevo,
+    -- o los dos mirarían banderas distintas y el primero ganaría.
+    local previous = getgenv().VANTA_BI2_HOOK
+
+    if type(previous) == "table" and previous.restore then
+        pcall(previous.restore)
     end
 
     if not canHook() then
@@ -200,11 +212,11 @@ local function installHook()
             and typeof(self) == "Instance"
             and self:IsA("RemoteEvent")
         then
-            if hook.antiSlip and self.Name == "IceSlip" then
+            if self.Name == "IceSlip" and State.Get("survival.antiSlip", false) then
                 return nil
             end
 
-            if hook.semiGod and self.Name == "Energy" then
+            if self.Name == "Energy" and State.Get("survival.semiGod", false) then
                 local args = table.pack(...)
 
                 if typeof(args[1]) == "number" and args[1] < 0 then
@@ -218,12 +230,29 @@ local function installHook()
     end))
 
     hook.installed = true
+
+    local previousOriginal = hook.original
+    local previousTarget = game
+
+    -- Cómo deshacerlo: se vuelve a poner el metamétodo que había antes.
+    getgenv().VANTA_BI2_HOOK = {
+        owner = tostring(os.clock()),
+        restore = function()
+            if hook.installed and hookmetamethod then
+                pcall(function()
+                    hookmetamethod(previousTarget, "__namecall", previousOriginal)
+                end)
+            end
+            hook.installed = false
+        end,
+    }
+
     return true
 end
 
 function Survival.SetSemiGod(enabled)
     if not enabled then
-        hook.semiGod = false
+        State.Set("survival.semiGod", false)
         return true, "semi godmode apagado"
     end
 
@@ -231,13 +260,13 @@ function Survival.SetSemiGod(enabled)
         return false, "tu ejecutor no expone hookmetamethod"
     end
 
-    hook.semiGod = true
+    State.Set("survival.semiGod", true)
     return true, "semi godmode activo: el daño de Energy se anula"
 end
 
 function Survival.SetAntiSlip(enabled)
     if not enabled then
-        hook.antiSlip = false
+        State.Set("survival.antiSlip", false)
         return true, "anti-slip apagado"
     end
 
@@ -245,7 +274,7 @@ function Survival.SetAntiSlip(enabled)
         return false, "tu ejecutor no expone hookmetamethod"
     end
 
-    hook.antiSlip = true
+    State.Set("survival.antiSlip", true)
     return true, "anti-slip activo: IceSlip se bloquea"
 end
 
@@ -267,12 +296,6 @@ function Survival.Setup()
         if not hum or hum.Health <= 0 then
             return
         end
-
-        -- Las banderas del hook se leen aquí: apagar la de la UI lo apaga
-        -- en el siguiente frame, sin reinstalar nada. Se combina con lo que
-        -- fijó SetSemiGod/SetAntiSlip por si el hook se instaló sin UI.
-        hook.antiSlip = State.Get("survival.antiSlip", false) or hook.antiSlipHeld
-        hook.semiGod = State.Get("survival.semiGod", false) or hook.semiGodHeld
 
         if not State.Get("survival.autoHeal") then
             return

@@ -56,7 +56,29 @@ sección o el script entero corta solo lo suyo.
 
 Medido: 7 conexiones registradas, 7 cortadas al cerrar, **0 quedan**.
 
-### 4. Una sección rota no tumba a las demás
+### 4. Ejecutar dos veces no rompe nada
+
+Antes, volver a pegar el script dejaba **dos ventanas, dos hooks y dos
+Heartbeats** sobre el mismo personaje. Activabas algo y la copia vieja lo
+deshacía en el mismo frame. Ahora, al arrancar, se apaga la copia anterior:
+
+```lua
+local previous = getgenv().VANTA_BI2
+if type(previous) == "table" and type(previous.Stop) == "function" then
+    pcall(previous.Stop)
+end
+```
+
+Además el hook del semi godmode **ya no guarda copias de sus banderas**.
+Antes tenía `hook.semiGod` y `hook.antiSlip`, y el `Heartbeat` las
+recalculaba en cada frame: encendías semi god, la UI decía "activo", y al
+frame siguiente el `Heartbeat` escribía `false` encima. Duraba un parpadeo.
+Ahora el hook lee `state.lua` en cada llamada: una sola fuente de verdad.
+
+Medido: `Energy(-25)` con semi god deja la vida en **100**; al apagarlo,
+vuelve a **75**.
+
+### 5. Una sección rota no tumba a las demás
 
 Cada `Setup()` corre dentro de un `pcall` en su propio hilo. Si una revienta,
 queda marcada como rota, se avisa en Diagnóstico, y las otras siete siguen
@@ -200,7 +222,11 @@ python3 tools/build.py    # regenerar VANTA-BreakIn2.lua
 | Aislamiento `broken` | con una rota, 7/8 sanas |
 | Aislamiento `toggle` | tocar una sección no cambia banderas ajenas |
 | Aislamiento `restore` | `WalkSpeed 64→16`, `CanCollide false→true` |
+| Aislamiento `hook` | `Energy(-25)` no baja la vida con semi god, y sí al apagarlo |
 | Aislamiento `teardown` | 7 cortadas, 0 quedan |
+| Reentrada `once/twice/thrice` | 1 sola ventana viva tras 1, 2 o 3 ejecuciones |
+| Reentrada `stopstart` | tras `Stop`, volver a ejecutar deja 8/8 sanas |
+| Reentrada `stopstop` | cerrar dos veces no explota; `getgenv` queda libre |
 | Bundle | 8 tabs, 31 botones, arranque completo, `Stop` limpio |
 | Loader | 12 escenarios con su mensaje correcto |
 
