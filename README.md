@@ -2,6 +2,11 @@
 
 Script con interfaz Rayfield Gen2 para Break In 2.
 
+**Arquitectura modular**: 9 módulos independientes, cada uno en su archivo,
+con su propio estado y sus propias conexiones. Un módulo roto no tumba a los
+demás y ninguno puede interferir con otro. Detalle en
+[ARQUITECTURA.md](ARQUITECTURA.md).
+
 ## La regla
 
 **Ninguna acción dice "solicitud enviada".** Cada botón:
@@ -34,10 +39,10 @@ La barra **no es una animación**. Cada etapa se marca cuando ocurre de verdad:
 | Etapa | Qué la hace pasar |
 | --- | --- |
 | `Conectar` | el loader arranca |
-| `Descargar` | llegan los KB de `VANTA.lua` (dos intentos de red) |
+| `Descargar` | llegan los KB de `VANTA-BreakIn2.lua` (dos intentos de red) |
 | `Compilar` | `loadstring` devuelve una función |
 | `Ejecutar` | el script corre sin error |
-| `Verificar remotos` | `VANTA.lua` confirma 7/7 remotos |
+| `Verificar módulos` | el script confirma que sus 9 módulos cargaron y 7/7 remotos existen |
 
 La verificación la hace el **propio script** a través de `State.Verify()`, no una
 copia de su lista. Una sola fuente de verdad.
@@ -46,12 +51,13 @@ Cómo se ve cada final:
 
 | Situación | Marcas | Qué queda en pantalla |
 | --- | --- | --- |
-| Todo bien | ✔ ✔ ✔ ✔ ✔ | `7/7 remotos \| hooks sí` |
+| Todo bien | ✔ ✔ ✔ ✔ ✔ | `9/9 módulos \| 7/7 remotos` |
 | Remotos incompletos | ✔ ✔ ✔ ✔ **!** ámbar | `faltan X, Y (PlaceId ...)` |
+| Módulo roto | ✔ ✔ ✔ ✔ **!** ámbar | `1 módulo roto (PlaceId ...)` |
 | Red caída | ✔ **✖** · · · | `no se pudo descargar: HttpError 502` |
 | Respuesta vacía | ✔ **✖** · · · | `no se pudo descargar: respuesta vacía` |
 | Error de sintaxis | ✔ ✔ **✖** · · | `error de sintaxis: syntax error near '='` |
-| Script falla al correr | ✔ ✔ ✔ **✖** · | `VANTA.lua falló: ...` |
+| Script falla al correr | ✔ ✔ ✔ **✖** · | `el script falló: ...` |
 | Script corre pero no deja estado | ✔ ✔ ✔ ✔ **✖** | `corrió pero no dejó estado` |
 
 Si hay `✖`, el mensaje **se queda en pantalla** y la barra no desaparece sola.
@@ -166,3 +172,33 @@ segunda carga cura con **un solo** remoto en vez de reintentar variantes.
 - Los scripts públicos de Break In 2 no leen el stat en ningún punto: solo
   disparan y esperan. El lector de stat de VANTA es propio, y si el juego no lo
   expone, la acción se informa sin afirmar que subió.
+
+## Módulos
+
+Nueve módulos, cada uno en su archivo. Ninguno llama a otro: se hablan por el
+Bus, y cada uno tiene su propio estado, sus conexiones y su error.
+
+| Módulo | Tipo | Qué hace |
+| --- | --- | --- |
+| `survival` | remoto | Curar, curar a todos, semi godmode, anti-slip |
+| `trainer` | remoto | Fuerza y velocidad, leyendo el stat para verificar |
+| `items` | remoto | Dar y equipar, comprobando la mochila |
+| `combat` | remoto | Daño a NPC, comprobando el Humanoid |
+| `navigation` | local | Teleports de la historia y a jugadores |
+| `movement` | local | Velocidad, salto, noclip |
+| `visuals` | local | ESP y fullbright |
+| `lobby` | remoto | Roles Hacker y Nerd |
+| `diagnostics` | core | Estado real de módulos, remotos y firmas |
+
+Todo el detalle del aislamiento, el contrato de un módulo y cómo partirlo en
+repositorios está en [ARQUITECTURA.md](ARQUITECTURA.md).
+
+## Desarrollo
+
+```bash
+python3 tools/build.py     # src/ (17 archivos) -> VANTA-BreakIn2.lua
+./tools/verify.sh          # sintaxis + aislamiento + script único + loader
+```
+
+El script único **no** es una copia pegada: cada módulo va en su propia entrada
+y se compila por separado, así un error en uno no impide que arranquen los demás.

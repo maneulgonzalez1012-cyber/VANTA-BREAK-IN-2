@@ -9,10 +9,10 @@
 
     Etapas
     1. Conectar
-    2. Descargar VANTA.lua
+    2. Descargar VANTA-BreakIn2.lua (script único con los 17 módulos)
     3. Compilar
     4. Ejecutar
-    5. Verificar remotos
+    5. Verificar módulos
 
     Si una etapa falla: se marca en rojo, el error se queda en pantalla y
     la barra no desaparece sola. Un clic cierra.
@@ -26,11 +26,13 @@ local RunService = game:GetService("RunService")
 -- CONFIGURACIÓN
 -- ─────────────────────────────────────────────────────────────
 
+-- Script único generado por tools/build.py: lleva los 17 módulos dentro
+-- y los carga por separado. Un módulo roto no impide que carguen los demás.
 local SOURCE_URL =
-    "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/main/VANTA.lua"
+    "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/main/VANTA-BreakIn2.lua"
 
 -- Para probar una branch sin merge, cambia la línea de arriba por:
--- .../VANTA-BREAK-IN-2/<branch>/VANTA.lua
+-- .../VANTA-BREAK-IN-2/<branch>/VANTA-BreakIn2.lua
 
 local PALETTE = {
     background = Color3.fromRGB(12, 11, 10),
@@ -48,7 +50,7 @@ local STAGES = {
     {name = "Descargar",         weight = 0.42},
     {name = "Compilar",          weight = 0.16},
     {name = "Ejecutar",          weight = 0.26},
-    {name = "Verificar remotos", weight = 0.10},
+    {name = "Verificar módulos",   weight = 0.10},
 }
 
 -- ─────────────────────────────────────────────────────────────
@@ -342,7 +344,7 @@ end
 
 local function Worker()
     -- 1. Conectar
-    SetStage(1, "resolviendo VANTA.lua")
+    SetStage(1, "resolviendo el script")
     task.wait(0.15)
 
     -- 2. Descargar (dos intentos: la red falla más de lo que parece)
@@ -415,7 +417,7 @@ local function Worker()
     local okRun, runError = pcall(chunk)
 
     if not okRun then
-        Fail(4, "VANTA.lua falló: " .. tostring(runError))
+        Fail(4, "el script falló: " .. tostring(runError))
         return
     end
 
@@ -469,23 +471,57 @@ local function Worker()
     end
 
     local found = report.expected - #report.missing
+    local modules = report.modules
 
     SetProgress(1)
-    Prog.detail = string.format(
-        "%d/%d remotos | hooks %s",
-        found,
-        report.expected,
-        report.hooks and "sí" or "no"
-    )
+
+    if modules then
+        Prog.detail = string.format(
+            "%d/%d módulos | %d/%d remotos",
+            modules.healthy or 0,
+            modules.total or 0,
+            found,
+            report.expected
+        )
+    else
+        Prog.detail = string.format(
+            "%d/%d remotos | hooks %s",
+            found,
+            report.expected,
+            report.hooks and "sí" or "no"
+        )
+    end
 
     Prog.finished = true
 
-    -- El script cargó, pero si faltan remotos no es un ✔ limpio:
-    -- se marca la etapa en ámbar y se dice por qué.
+    -- El script cargó. Pero si faltan remotos o algún módulo no arrancó,
+    -- no es un ✔ limpio: se marca la etapa en ámbar y se dice por qué.
     if not report.ok then
+        local causes = {}
+
+        if #report.missing > 0 then
+            table.insert(causes, "faltan " .. table.concat(report.missing, ", "))
+        end
+
+        if modules and (modules.broken or 0) > 0 then
+            table.insert(causes, string.format(
+                "%d %s",
+                modules.broken,
+                modules.broken == 1 and "módulo roto" or "módulos rotos"
+            ))
+        end
+
+        if modules and (modules.conflicts or 0) > 0 then
+            table.insert(causes, string.format(
+                "%d %s",
+                modules.conflicts,
+                modules.conflicts == 1 and "acción en conflicto" or "acciones en conflicto"
+            ))
+        end
+
         Prog.partial = string.format(
-            "faltan %s (PlaceId %s)",
-            table.concat(report.missing, ", "),
+            "%s (PlaceId %s)",
+            table.concat(causes, " y "),
             tostring(game.PlaceId)
         )
 
