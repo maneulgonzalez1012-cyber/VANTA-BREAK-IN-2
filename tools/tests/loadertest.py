@@ -12,12 +12,15 @@ for line in src.split("\n"):
         ind, lhs, op, rhs = m.groups()
         line = f'{ind}{lhs} = {lhs} {op[0]} ({rhs})'
     lines.append(line)
-dsrc = "\n".join(lines)
+# El banco no puede esperar los 12 s reales del tiempo límite: se baja a 3.
+dsrc = "\n".join(lines).replace("local RUN_TIMEOUT = 12", "local RUN_TIMEOUT = 1")
+assert "local RUN_TIMEOUT = 1" in dsrc, "no se pudo bajar RUN_TIMEOUT"
 
 lua = lupa.LuaRuntime(unpack_returned_tuples=True)
 
 MOCK = r'''
 MODE = "%s"
+TICK = 0
 LOG = {}
 HISTORY = {}
 INST = {}
@@ -130,19 +133,44 @@ function getgenv() return ENV end
 function warn(...) say("WARN", table.concat({...}, " ")) end
 
 CO = {}
+
+-- os.clock del mock: avanza con cada espera. Si no, el tiempo límite de
+-- la etapa 4 se compara contra un reloj congelado y nunca expira.
+os = {clock = function() return TICK end}
+
 task = {
     spawn = function(f)
         local co = coroutine.create(f)
         CO[#CO+1] = co
         return { cancel = function() end }
     end,
-    wait = function() coroutine.yield() end,
+    -- os.clock del mock: avanza con cada espera. Si no, el tiempo límite
+    -- de la etapa 4 se compara contra un reloj congelado y nunca expira.
+    wait = function(t) TICK = TICK + (t or 0) coroutine.yield() end,
 }
 
 function loadstring(s)
     if MODE == "syntax" then return nil, "syntax error near '='" end
     if MODE == "runerr" then return function() error("boom dentro de VANTA.lua") end end
     if MODE == "nostate" then return function() end end
+
+    -- Se queda en "Ejecutar": el chunk nunca vuelve. Es el caso real.
+    if MODE == "hang" then
+        return function() while true do coroutine.yield() end end
+    end
+
+    -- Tarda, pero termina. No debe reportarse como fallo.
+    if MODE == "slow" then
+        return function()
+            for _ = 1, 5 do coroutine.yield() end
+            ENV.VANTA_BI2 = {
+                Verify = function()
+                    return { ok = true, expected = #EXPECTED, missing = {},
+                             hooks = true, modules = {total = 9, healthy = 9, broken = 0, conflicts = 0} }
+                end,
+            }
+        end
+    end
     if MODE == "notmodules" then
         return function()
             ENV.VANTA_BI2 = {
@@ -212,7 +240,29 @@ function drive(src, maxSteps)
         if not alive then return "TERMINADO en " .. step .. " pasos" end
     end
 
-    return "SIGUE VIVO tras " .. maxSteps .. " pasos"
+    -- Si el ScreenGui ya se destruyó, el loader terminó: lo que sigue
+    -- "vivo" es el hilo huérfano del script que se colgó, no el loader.
+    local guiFinal
+    for _, i in ipairs(INST) do
+        if i.ClassName == "ScreenGui" then guiFinal = i end
+    end
+
+    if guiFinal and guiFinal.Destroyed then
+        return "LOADER TERMINADO (hilo huérfano del script sigue vivo)"
+    end
+
+    local donde = "?"
+
+    for _, i in ipairs(INST) do
+        if i.ClassName == "TextLabel" and i.Text ~= ""
+           and i.Text ~= "✔" and i.Text ~= "✖" and i.Text ~= "·"
+           and i.Text ~= "VANTA" and i.Text ~= "BREAK IN 2" and i.Text ~= "clic para cerrar"
+        then
+            donde = i.Text
+        end
+    end
+
+    return "SIGUE VIVO tras " .. maxSteps .. " pasos | detail: " .. tostring(donde)
 end
 ''')
 

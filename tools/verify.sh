@@ -51,13 +51,14 @@ else
 fi
 
 line
-echo "5. Loader (10 escenarios)"
+echo "5. Loader (12 escenarios)"
 line
-for mode in ok pr404 missing brokenmodule notmodules neterr empty syntax runerr nostate; do
+for mode in ok pr404 slow missing brokenmodule notmodules neterr empty syntax runerr nostate hang; do
     printf '   %-14s ' "$mode"
     out=$(python3 /tmp/lt_clean.py "$mode" 2>&1)
-    if echo "$out" | grep -q 'resultado: TERMINADO'; then
-        echo "$out" | grep -oE '\[[0-9]+/[0-9]+ (módulos|remotos)[^]]*\]|WARN.*' | head -1 | sed 's/^WARN \[VANTA Loader\] //' || true
+    if echo "$out" | grep -qE 'resultado: (TERMINADO|LOADER TERMINADO)'; then
+        echo "$out" | grep -oE '\[[0-9]+/[0-9]+ (módulos|remotos)[^]]*\]' | head -1
+        echo "$out" | grep -oE 'WARN \[VANTA Loader\] .*' | head -1 | sed 's/^WARN \[VANTA Loader\] //'
         echo
     else
         echo "SE COLGÓ"

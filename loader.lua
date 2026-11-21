@@ -51,6 +51,10 @@ local PALETTE = {
     warn = Color3.fromRGB(218, 178, 108),
 }
 
+-- Cuánto se espera a que el script termine de montarse antes de
+-- comprobarlo por fuera. Si el juego tarda más, no es un fallo.
+local RUN_TIMEOUT = 12
+
 local STAGES = {
     {name = "Conectar",          weight = 0.06},
     {name = "Descargar",         weight = 0.42},
@@ -437,16 +441,48 @@ local function Worker()
     SetProgress(1)
 
     -- 4. Ejecutar
+    --
+    -- Ojo con esta etapa: `chunk()` puede quedarse esperando para siempre
+    -- (un GetService, un WaitForChild, la descarga del menú). Si se llama
+    -- directo, la barra se queda en "montando interfaz" y no hay error que
+    -- mostrar: exactamente el síntoma de "se queda en Ejecutar".
+    --
+    -- Corre en su propio hilo y con tiempo límite. El pcall va DENTRO del
+    -- hilo: así se captura el error del script sin perder el tiempo límite.
     SetStage(4, "montando interfaz")
 
-    local okRun, runError = pcall(chunk)
+    -- Se usa una bandera y no `coroutine.status`: no todos los ejecutores
+    -- devuelven un hilo de `task.spawn`, y el loader no debe depender de eso.
+    local outcome = nil
+    local finished = false
 
-    if not okRun then
-        Fail(4, "el script falló: " .. tostring(runError))
+    task.spawn(function()
+        local ok, err = pcall(chunk)
+        outcome = {ok = ok, err = err}
+        finished = true
+    end)
+
+    local started = os.clock()
+
+    while not finished and (os.clock() - started) <= RUN_TIMEOUT do
+        task.wait(0.1)
+    end
+
+    if outcome and not outcome.ok then
+        Fail(4, "el script falló: " .. tostring(outcome.err))
         return
     end
 
-    SetProgress(1)
+    if not finished then
+        -- Sigue montándose. No es un fallo: se comprueba por fuera y la
+        -- etapa 5 dirá si de verdad quedó algo funcionando.
+        Prog.detail = string.format(
+            "sigue montándose tras %ds; comprobando por fuera",
+            RUN_TIMEOUT
+        )
+    else
+        SetProgress(1)
+    end
 
     -- 5. Verificar: el script deja su estado en getgenv. Si no está, no cargó.
     SetStage(5, "comprobando")
@@ -454,7 +490,50 @@ local function Worker()
     local state = getgenv and getgenv().VANTA_BI2
 
     if not state then
-        Fail(5, "el script corrió pero no dejó estado (¿return temprano?)")
+        -- No basta con decir "no dejó estado": hay que decir POR QUÉ.
+        -- Aquí se comprueba lo que el script necesita para arrancar y
+        -- suele faltar en ejecutores móviles.
+        local problems = {}
+
+        if type(loadstring) ~= "function" then
+            table.insert(problems, "tu ejecutor no tiene loadstring")
+        end
+
+        if type(game.HttpGet) ~= "function" then
+            table.insert(problems, "tu ejecutor no tiene HttpGet")
+        end
+
+        local okRs, replicated = pcall(function()
+            return game:GetService("ReplicatedStorage")
+        end)
+
+        if not okRs or not replicated then
+            table.insert(problems, "no se puede leer ReplicatedStorage")
+        else
+            local events = replicated:FindFirstChild("Events")
+
+            if not events then
+                table.insert(problems, "este lugar no tiene ReplicatedStorage.Events"
+                    .. " (¿estás en Break In 2?)")
+            end
+        end
+
+        local gui
+
+        pcall(function()
+            gui = game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        end)
+
+        if not gui then
+            table.insert(problems, "tu PlayerGui no está listo todavía")
+        end
+
+        if #problems == 0 then
+            table.insert(problems, "el script terminó sin crear su estado"
+                .. " (mira la consola con F9)")
+        end
+
+        Fail(5, "no arrancó: " .. table.concat(problems, " | "))
         return
     end
 

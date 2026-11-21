@@ -45,8 +45,8 @@ La barra **no es una animación**. Cada etapa se marca cuando ocurre de verdad:
 | `Conectar` | el loader arranca |
 | `Descargar` | llegan los KB de `VANTA-BreakIn2.lua` (dos intentos de red) |
 | `Compilar` | `loadstring` devuelve una función |
-| `Ejecutar` | el script corre sin error |
-| `Verificar módulos` | el script confirma que sus 9 módulos cargaron y 7/7 remotos existen |
+| `Ejecutar` | el script corre sin error, con 12 s de límite: si se queda montándose, no bloquea la barra |
+| `Verificar módulos` | el script confirma que sus 9 módulos cargaron y 7/7 remotos existen. Si no dejó estado, dice **qué falta**: `loadstring`, `HttpGet`, `ReplicatedStorage.Events`, `PlayerGui` |
 
 La verificación la hace el **propio script** a través de `State.Verify()`, no una
 copia de su lista. Una sola fuente de verdad.
@@ -58,6 +58,7 @@ Cómo se ve cada final:
 | Todo bien | ✔ ✔ ✔ ✔ ✔ | `9/9 módulos \| 7/7 remotos` |
 | Remotos incompletos | ✔ ✔ ✔ ✔ **!** ámbar | `faltan X, Y (PlaceId ...)` |
 | Módulo roto | ✔ ✔ ✔ ✔ **!** ámbar | `1 módulo roto (PlaceId ...)` |
+| Script que se queda montándose | ✔ ✔ ✔ ✔ **✖** | `no arrancó: ... | el script terminó sin crear su estado (mira la consola con F9)` |
 | Red caída | ✔ **✖** · · · | `no se pudo descargar: main (HttpError 502) \| branch (HttpError 502)` |
 | Respuesta vacía | ✔ **✖** · · · | `no se pudo descargar: main (respuesta vacía) \| branch (respuesta vacía)` |
 | Error de sintaxis | ✔ ✔ **✖** · · | `error de sintaxis: syntax error near '='` |
