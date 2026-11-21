@@ -23,7 +23,7 @@ import re
 import os
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
+ROOT = pathlib.Path(__file__).resolve().parent
 SRC = ROOT / "src"
 OUT = ROOT / "VANTA-BreakIn2.lua"
 

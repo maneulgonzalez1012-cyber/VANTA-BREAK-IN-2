@@ -19,7 +19,7 @@ import sys
 
 import lupa
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 
 lua = lupa.LuaRuntime(unpack_returned_tuples=True, register_eval=False)

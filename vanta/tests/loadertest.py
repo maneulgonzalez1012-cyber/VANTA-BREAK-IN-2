@@ -4,7 +4,7 @@ MODE = sys.argv[1] if len(sys.argv) > 1 else "ok"
 
 # desugar Luau compound assignment
 import pathlib
-src = open(pathlib.Path(__file__).resolve().parent.parent.parent / 'loader.lua', encoding='utf-8').read()
+src = open(pathlib.Path(__file__).resolve().parent.parent / "loader.lua", encoding='utf-8').read()
 lines = []
 for line in src.split("\n"):
     m = re.match(r'^(\s*)([\w\.\[\]"\']+?)\s*(\+=|-=|\*=|/=)\s*(.+)$', line)
