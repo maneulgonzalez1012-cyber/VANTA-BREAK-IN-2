@@ -13,12 +13,23 @@
     en pantalla. Nada de "cargando..." infinito.
 ]]
 
-local SOURCE_PATHS = {
-    "/main/StrongmanSimulator.lua",
-    "/arena/51187ad8-vanta-break-in-2/StrongmanSimulator.lua",
+-- El repositorio se renombró a StrongmanSimulator, pero mientras el cambio
+-- no esté aplicado la URL vieja es la que responde. Se prueban todas: si el
+-- dueño renombra (o no), el script sigue entrando igual.
+local SOURCES = {
+    {
+        name = "repo nuevo",
+        url = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/StrongmanSimulator/arena/51187ad8-vanta-break-in-2/StrongmanSimulator.lua",
+    },
+    {
+        name = "repo actual",
+        url = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/arena/51187ad8-vanta-break-in-2/StrongmanSimulator.lua",
+    },
+    {
+        name = "main",
+        url = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/main/StrongmanSimulator.lua",
+    },
 }
-
-local BASE = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/StrongmanSimulator/"
 
 local PLACE_ID = 6766156863
 local RUN_TIMEOUT = 12
@@ -205,18 +216,18 @@ end
 local function download()
     local errors = {}
 
-    for _, path in ipairs(SOURCE_PATHS) do
+    for _, source in ipairs(SOURCES) do
         local ok, body = pcall(function()
-            return game:HttpGet(BASE .. path, true)
+            return game:HttpGet(source.url, true)
         end)
 
         if ok and type(body) == "string" and #body > 1000 then
-            return body
+            return body, source.name
         end
 
         table.insert(errors, string.format(
             "%s: %s",
-            path:match("^/([^/]+)/") or path,
+            source.name,
             ok and "respuesta vacía" or tostring(body)
         ))
     end
@@ -267,13 +278,13 @@ local function worker()
     -- 2. Descargar.
     setStage(2, "descargando")
 
-    local source, downloadError = download()
+    local source, origin, downloadError = download()
 
     if not source then
-        return false, "no se pudo descargar: " .. tostring(downloadError)
+        return false, "no se pudo descargar: " .. tostring(origin)
     end
 
-    setStage(2, string.format("%d KB", math.floor(#source / 1024)))
+    setStage(2, string.format("%d KB desde %s", math.floor(#source / 1024), tostring(origin)))
 
     -- 3. Compilar.
     setStage(3, "compilando")

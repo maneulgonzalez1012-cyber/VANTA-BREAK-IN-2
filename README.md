@@ -9,14 +9,12 @@ Un solo script, 15 módulos dentro, cada pestaña aislada de las demás.
 ## Cargar
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/StrongmanSimulator/main/StrongmanLoader.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/arena/51187ad8-vanta-break-in-2/StrongmanLoader.lua"))()
 ```
 
-Mientras el PR esté abierto, la rama:
-
-```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/StrongmanSimulator/arena/51187ad8-vanta-break-in-2/StrongmanLoader.lua"))()
-```
+El loader prueba varias URLs y usa la primera que responda: la del repo con
+el nombre nuevo, la del repo actual y `main`. Renombres el repositorio o no,
+el comando de arriba sigue entrando.
 
 ## Qué hace
 
