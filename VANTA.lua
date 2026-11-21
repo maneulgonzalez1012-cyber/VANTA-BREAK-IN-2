@@ -2,30 +2,23 @@
     VANTA | BREAK IN 2
     Executor + Rayfield Gen2
 
-    Reescrito sobre los remotos verificados del juego.
+    REGLA ÚNICA
+    Ningún remoto se manda y se reza. Cada acción hace:
+        1. dispara
+        2. verifica en el cliente que pasó DE VERDAD
+        3. si no pasó, reintenta por otra vía o lo fuerza localmente
+        4. informa qué ocurrió, no qué se intentó
 
-    LUGARES (PlaceId)
+    Lo que es local (movimiento, noclip, luz, ESP, daño visual) no se pide:
+    se escribe en la propiedad cada frame. El servidor no lo puede rechazar.
+
+    Lo que es remoto (objetos, cura, entrenamiento, golpes) se verifica contra
+    el estado real del cliente: mochila, vida, stat, Humanoid del NPC.
+
+    PlaceIds
     - 13864667823  historia
     - 14775231477  lobby privado
     - 13864661000  lobby
-
-    REMOTOS CONFIRMADOS (ReplicatedStorage.Events)
-    - GiveTool(nombre)                       dar herramienta
-    - Vending(3, item, categoria, quien, 1)  vending / armas
-    - Energy(delta, item)                    curar o dañar
-    - HealTheNoobs()                         curar a todos los NPC
-    - RainbowWhatStat("Strength"/"Speed")    entrenar
-    - HitBadguy(modelo, daño, 4)             daño a NPC
-    - RoadMissionEvent(1, part, 5)           romper árboles
-    - OutsideFood(6, {item2=, placement=})   comida en la cocina
-    - LarryEndingEvent(clave, true)          final secreto
-    - IceSlip(Vector3)                       resbalón (bloqueado)
-    - OnDoorHit(parte)                       golpear puerta
-    - CatFed(item) / LouiseGive(2) / KeyEvent()
-
-    NOTAS
-    - FireServer no confirma que el servidor acepte la acción.
-    - Lo que es solo local (movimiento, noclip, luz, ESP) se dice en la UI.
 ]]
 
 if not game:IsLoaded() then
@@ -41,8 +34,8 @@ local Workspace = game:GetService("Workspace")
 
 local Player = Players.LocalPlayer
 local Env = getgenv()
+local Clock = os.clock
 
--- Evitar varias instancias activas.
 if Env.VANTA_BI2 and type(Env.VANTA_BI2.Stop) == "function" then
     pcall(Env.VANTA_BI2.Stop)
 end
@@ -58,22 +51,21 @@ local State = {
     SemiGod = false,
     AntiSlip = false,
     AutoHeal = false,
-    AutoHealAmount = 25,
+    HealAmount = 25,
     AutoAttack = false,
     ESP = false,
-    EnemyESP = false,
 
     SpeedEnabled = false,
     JumpEnabled = false,
     InfJump = false,
     Noclip = false,
     Fullbright = false,
-    NoWind = false,
-    NoMud = false,
-    FreezeEnemies = false,
 
     Speed = 32,
     Jump = 75,
+    OriginalSpeed = 16,
+    OriginalJump = 50,
+    OriginalUseJumpPower = true,
 
     AttackDamage = 65,
     AttackBurst = 4,
@@ -84,26 +76,23 @@ local State = {
 
     SelectedItem = "Golden Apple",
     SelectedPlayer = "",
-    FoodPlacement = 1,
 
     Connections = {},
     ESPObjects = {},
-    EnemyESPObjects = {},
     CollisionCache = {},
     HumanoidCache = setmetatable({}, {__mode = "k"}),
+    RemoteCache = {},
 
     Stats = {
-        Kills = 0,
-        Damage = 0,
-        Heals = 0,
-        Items = 0,
-        Trains = 0,
+        Executed = 0,
+        Failed = 0,
+        Retries = 0,
         Dropped = 0,
     },
 
     Errors = 0,
     LastError = "Ninguno",
-    MissingRemotes = {},
+    Trace = {},
 }
 
 Env.VANTA_BI2 = State
@@ -162,106 +151,42 @@ local function GetRoot()
     return character and character:FindFirstChild("HumanoidRootPart")
 end
 
-local function IsAlive()
+local function GetBackpack()
+    return Player:FindFirstChildOfClass("Backpack")
+end
+
+local function ToolName(item)
+    return (tostring(item):gsub("%s", ""))
+end
+
+local function Alive()
     local humanoid = GetHumanoid()
 
     return humanoid ~= nil and humanoid.Health > 0
 end
 
--- Nombres de herramienta: el juego quita los espacios ("Golden Apple" -> "GoldenApple")
-local function ToolName(item)
-    return (tostring(item):gsub("%s", ""))
-end
+-- Espera a que una condición se cumpla. Es la pieza que convierte
+-- "envié una petición" en "esto ocurrió".
+local function Await(label, predicate, timeout, interval)
+    timeout = timeout or 1.5
+    interval = math.max(interval or 0.05, 0.02)
 
--- ============================================================
--- REMOTOS
--- ============================================================
+    local started = Clock()
+    local spins = 0
+    local maxSpins = 200
 
-local function GetEventsFolder()
-    local folder = ReplicatedStorage:FindFirstChild("Events")
+    repeat
+        local ok, value = pcall(predicate)
 
-    if not folder then
-        folder = ReplicatedStorage:FindFirstChild("RemoteEvents")
-    end
+        if ok and value then
+            return true, value
+        end
 
-    return folder
-end
+        spins += 1
+        task.wait(interval)
+    until Clock() - started >= timeout or spins >= maxSpins
 
-local function FindRemote(folderName, remoteName)
-    local folder = ReplicatedStorage:FindFirstChild(folderName)
-
-    if not folder then
-        return nil, "No existe ReplicatedStorage." .. folderName
-    end
-
-    local remote = folder:FindFirstChild(remoteName)
-
-    if not remote or not remote:IsA("RemoteEvent") then
-        return nil, "No existe " .. folderName .. "." .. remoteName
-    end
-
-    return remote
-end
-
-local function RememberMissing(label)
-    State.MissingRemotes[label] = true
-end
-
--- Los remotos son baratos pero no infinitos: un bucle de 60 paquetes por
--- segundo es la vía rápida al kick. Esto lo corta.
-local RateLimit = {
-    Window = 1,
-    Max = 40,
-    Count = 0,
-    Started = os.clock(),
-}
-
-local function RateAllowed()
-    local now = os.clock()
-
-    if now - RateLimit.Started >= RateLimit.Window then
-        RateLimit.Started = now
-        RateLimit.Count = 0
-    end
-
-    if RateLimit.Count >= RateLimit.Max then
-        State.Stats.Dropped += 1
-        return false
-    end
-
-    RateLimit.Count += 1
-    return true
-end
-
-local function Fire(folderName, remoteName, ...)
-    local remote, err = FindRemote(folderName, remoteName)
-
-    if not remote then
-        RememberMissing(folderName .. "." .. remoteName)
-        return false, err
-    end
-
-    if not RateAllowed() then
-        return false, "límite de paquetes alcanzado"
-    end
-
-    local args = table.pack(...)
-
-    local ok, result = pcall(function()
-        remote:FireServer(table.unpack(args, 1, args.n))
-    end)
-
-    if not ok then
-        return false, tostring(result)
-    end
-
-    -- Solo confirma que se intentó enviar la solicitud.
-    return true
-end
-
--- Atajo para el folder real del juego.
-local function Event(remoteName, ...)
-    return Fire("Events", remoteName, ...)
+    return false
 end
 
 -- ============================================================
@@ -269,9 +194,7 @@ end
 -- ============================================================
 
 local okLibrary, Rayfield = pcall(function()
-    local source = game:HttpGet("https://sirius.menu/gen2")
-
-    return loadstring(source)()
+    return loadstring(game:HttpGet("https://sirius.menu/gen2"))()
 end)
 
 if not okLibrary or not Rayfield then
@@ -283,7 +206,7 @@ end
 local okWindow, Window = pcall(function()
     return Rayfield:CreateWindow({
         name = "VANTA | BREAK IN 2",
-        subtitle = "Remotos verificados",
+        subtitle = "Ejecuta · verifica · informa",
         sidebarLayout = true,
         configuration = {
             autoSave = true,
@@ -313,18 +236,21 @@ local function Notify(title, content)
     end)
 end
 
-local function TryFire(folderName, remoteName, ...)
-    local ok, err = Fire(folderName, remoteName, ...)
-
-    if not ok then
-        Notify("Remoto no disponible", err)
+-- Informe uniforme: nunca dice "enviado", dice qué ocurrió.
+local function Report(title, executed, detail)
+    if executed then
+        State.Stats.Executed += 1
+        Notify(title, "✔ " .. tostring(detail))
+    else
+        State.Stats.Failed += 1
+        Notify(title, "✖ " .. tostring(detail))
     end
 
-    return ok
+    return executed
 end
 
 -- ============================================================
--- HOOK: SEMI GODMODE / ANTI SLIP
+-- HOOK: SEMI GODMODE / ANTI-SLIP
 -- ============================================================
 
 local HookAvailable =
@@ -343,20 +269,19 @@ if HookAvailable then
                 if State.Running and getnamecallmethod() == "FireServer" then
                     local args = table.pack(...)
 
-                    -- Anti-slip: no se envía nada al remoto IceSlip.
                     if State.AntiSlip
                         and type(self) == "userdata"
-                        and self.Name == "IceSlip"
                         and self:IsA("RemoteEvent")
+                        and self.Name == "IceSlip"
                     then
+                        State.Stats.Dropped += 1
                         return nil
                     end
 
-                    -- Semi godmode: el daño viaja como número negativo en Energy.
                     if State.SemiGod
                         and type(self) == "userdata"
-                        and self.Name == "Energy"
                         and self:IsA("RemoteEvent")
+                        and self.Name == "Energy"
                     then
                         if type(args[1]) == "number" and args[1] < 0 then
                             args[1] = 0
@@ -382,316 +307,179 @@ if HookAvailable then
 end
 
 -- ============================================================
--- OBJETOS
+-- CAPA DE REMOTOS
 -- ============================================================
 
-local Weapons = {
-    ["Crowbar 1"] = true,
-    ["Crowbar 2"] = true,
-    ["Crowbar 3"] = true,
-    ["Bat"] = true,
-    ["Pitchfork"] = true,
-    ["Hammer"] = true,
-    ["Wrench"] = true,
-    ["Broom"] = true,
+-- Presupuesto de paquetes: los reintentos de verificación no pueden
+-- convertirse en un flood que te saque de la partida.
+local Budget = {
+    Window = 1,
+    Max = 60,
+    Count = 0,
+    Started = Clock(),
 }
 
--- El vending usa el id interno, que no siempre coincide con el nombre visible.
-local WeaponIDs = {
-    ["Diamond Crowbar"] = "Crowbar3",
-}
+local function BudgetAllows()
+    local now = Clock()
 
-local Items = {
-    "Golden Apple",
-    "Gold Pizza",
-    "Rainbow Pizza",
-    "Rainbow Pizza Box",
-    "Pizza",
-    "Cookie",
-    "Apple",
-    "Chips",
-    "Lollipop",
-    "Bloxy Cola",
-    "Expired Bloxy Cola",
-    "Bottle",
-    "Battery",
-    "Med Kit",
-    "Armor",
-    "Key",
-    "Gold Key",
-    "Louise",
-    "Book",
-    "Phone",
-    "Ladder",
-    "Crowbar 1",
-    "Crowbar 2",
-    "Diamond Crowbar",
-    "Bat",
-    "Pitchfork",
-    "Hammer",
-    "Wrench",
-    "Broom",
-}
+    if now - Budget.Started >= Budget.Window then
+        Budget.Started = now
+        Budget.Count = 0
+    end
 
-local function GiveItem(item, silent)
-    if type(item) ~= "string" or item == "" then
+    if Budget.Count >= Budget.Max then
+        State.Stats.Dropped += 1
         return false
     end
 
-    local ok, err
-
-    if item == "Armor" then
-        ok, err = Event("Vending", 3, "Armor2", "Armor", Player.Name, 1)
-
-    elseif Weapons[item] or WeaponIDs[item] then
-        ok, err = Event(
-            "Vending",
-            3,
-            WeaponIDs[item] or ToolName(item),
-            "Weapons",
-            Player.Name,
-            1
-        )
-
-    else
-        -- Herramientas y comida: GiveTool con el nombre sin espacios.
-        ok, err = Event("GiveTool", ToolName(item))
-    end
-
-    if ok then
-        State.Stats.Items += 1
-    elseif not silent then
-        Notify("Objeto", err)
-    end
-
-    return ok
+    Budget.Count += 1
+    return true
 end
 
--- Variante silenciosa: los spammers usan esto para no inundar notificaciones.
-local function GiveItemRaw(item)
-    return GiveItem(item, true)
+local function ResolveRemote(folderName, remoteName)
+    local key = folderName .. "." .. remoteName
+    local cached = State.RemoteCache[key]
+
+    if cached and cached.Parent then
+        return cached
+    end
+
+    local folder = ReplicatedStorage:FindFirstChild(folderName)
+
+    if not folder then
+        return nil, "falta ReplicatedStorage." .. folderName
+    end
+
+    local remote = folder:FindFirstChild(remoteName)
+
+    if not remote or not remote:IsA("RemoteEvent") then
+        return nil, "falta " .. key
+    end
+
+    State.RemoteCache[key] = remote
+
+    return remote
 end
 
-local function GiveList(list, delay)
-    task.spawn(function()
-        local sent = 0
+-- Dispara una vez. Devuelve ok, motivo.
+local function Emit(folderName, remoteName, ...)
+    local remote, reason = ResolveRemote(folderName, remoteName)
 
-        for _, item in ipairs(list) do
-            if not State.Running then
-                return
-            end
+    if not remote then
+        return false, reason
+    end
 
-            if GiveItemRaw(item) then
-                sent += 1
-            end
+    if not BudgetAllows() then
+        return false, "presupuesto de paquetes agotado"
+    end
 
-            task.wait(delay or 0.25)
-        end
+    local args = table.pack(...)
 
-        Notify(
-            "Objetos",
-            tostring(sent) .. "/" .. tostring(#list)
-                .. " solicitudes enviadas. Revisa el inventario."
-        )
+    local ok, err = pcall(function()
+        remote:FireServer(table.unpack(args, 1, args.n))
     end)
+
+    if not ok then
+        return false, tostring(err)
+    end
+
+    return true
+end
+
+local function Evt(remoteName, ...)
+    return Emit("Events", remoteName, ...)
 end
 
 -- ============================================================
--- CURA
+-- DETECTORES
 -- ============================================================
 
-local function HasTool(toolName)
-    local backpack = Player:FindFirstChildOfClass("Backpack")
+local function FindToolIn(item)
+    local name = ToolName(item)
+    local backpack = GetBackpack()
     local character = GetCharacter()
 
-    if backpack and backpack:FindFirstChild(toolName) then
-        return true
-    end
+    if backpack then
+        local tool = backpack:FindFirstChild(name)
 
-    if character and character:FindFirstChild(toolName) then
-        return true
-    end
-
-    return false
-end
-
-local function HealSelf(silent, amount)
-    amount = amount or State.AutoHealAmount
-
-    if amount <= 0 then
-        amount = 25
-    end
-
-    if not IsAlive() then
-        return false
-    end
-
-    -- Solo pide pizza si no hay ninguna: pedirla en cada tick es lo que
-    -- hace que el servidor te trate como spammer.
-    local okItem, errItem = true, nil
-
-    if not HasTool("Pizza") then
-        okItem, errItem = Event("GiveTool", "Pizza")
-        task.wait(0.1)
-    end
-
-    -- El servidor valida el ítem al procesar Energy.
-    local okEnergy, errEnergy = Event("Energy", amount, "Pizza")
-
-    if okEnergy then
-        State.Stats.Heals += 1
-    end
-
-    if not silent then
-        if not okItem then
-            Notify("Curación", errItem)
-        elseif not okEnergy then
-            Notify("Curación", errEnergy)
-        else
-            Notify("Curación", "Solicitud de +" .. tostring(amount) .. " enviada.")
+        if tool then
+            return tool, "mochila"
         end
     end
 
-    return okItem and okEnergy
-end
+    if character then
+        local tool = character:FindFirstChild(name)
 
-local function EquipTool(toolName)
-    local character = GetCharacter()
-    local backpack = Player:FindFirstChildOfClass("Backpack")
-
-    if not character or not backpack then
-        return nil
-    end
-
-    local tool = backpack:FindFirstChild(toolName)
-        or character:FindFirstChild(toolName)
-
-    if not tool then
-        return nil
-    end
-
-    if tool.Parent ~= character then
-        pcall(function()
-            tool.Parent = character
-        end)
-    end
-
-    return tool
-end
-
-local HealGuard = false
-
-local function HealEveryone()
-    if HealGuard then
-        Notify("Curar a todos", "Ya hay una cura en curso.")
-        return
-    end
-
-    HealGuard = true
-
-    task.spawn(function()
-        local ok = Safe("HealEveryone", function()
-            local humanoid = GetHumanoid()
-
-            if humanoid then
-                humanoid:UnequipTools()
-                task.wait(0.15)
-            end
-
-            if not GetCharacter() then
-                Notify("Curar a todos", "No hay personaje.")
-                return
-            end
-
-            if not GiveItemRaw("Golden Apple") then
-                Notify("Curar a todos", "No se pudo pedir la manzana dorada.")
-                return
-            end
-
-            local backpack = Player:FindFirstChildOfClass("Backpack")
-
-            if not backpack then
-                Notify("Curar a todos", "No se encontró la mochila.")
-                return
-            end
-
-            local apple = backpack:FindFirstChild("GoldenApple")
-                or backpack:WaitForChild("GoldenApple", 4)
-
-            local character = GetCharacter()
-
-            if not apple or not character then
-                Notify(
-                    "Curar a todos",
-                    "La manzana dorada no llegó o falta el personaje."
-                )
-                return
-            end
-
-            pcall(function()
-                apple.Parent = character
-            end)
-
-            task.wait(0.4)
-
-            if Event("HealTheNoobs") then
-                State.Stats.Heals += 1
-                Notify("Curar a todos", "Solicitud enviada.")
-            else
-                Notify("Curar a todos", "HealTheNoobs no disponible.")
-            end
-        end)
-
-        HealGuard = false
-
-        if not ok then
-            Notify("Curar a todos", "Error: " .. tostring(State.LastError))
+        if tool then
+            return tool, "equipada"
         end
-    end)
+    end
+
+    return nil
 end
 
--- ============================================================
--- ENTRENAMIENTO
--- ============================================================
+local function CountTools()
+    local count = 0
+    local backpack = GetBackpack()
 
-local function Train(stat, amount, silent)
-    amount = math.clamp(tonumber(amount) or 5, 1, 100)
-
-    task.spawn(function()
-        local sent = 0
-
-        for _ = 1, amount do
-            if not State.Running then
-                return
+    if backpack then
+        for _, child in ipairs(backpack:GetChildren()) do
+            if child:IsA("Tool") then
+                count += 1
             end
+        end
+    end
 
-            local ok, err = Event("RainbowWhatStat", stat)
+    return count
+end
 
-            if not ok then
-                if not silent then
-                    Notify("Entrenamiento", err)
+local function ReadHealth()
+    local humanoid = GetHumanoid()
+
+    return humanoid and humanoid.Health or 0
+end
+
+local function ReadMaxHealth()
+    local humanoid = GetHumanoid()
+
+    return humanoid and humanoid.MaxHealth or 100
+end
+
+-- Busca un stat legible en el cliente. El juego lo expone de formas
+-- distintas según la versión, así que se prueban todas.
+local function ReadStat(statName)
+    local wanted = statName:lower()
+
+    -- 1. Valores numéricos colgados del jugador.
+    for _, object in ipairs(Player:GetDescendants()) do
+        if (object:IsA("NumberValue") or object:IsA("IntValue"))
+            and object.Name:lower():find(wanted, 1, true)
+        then
+            return object.Value, object:GetFullName()
+        end
+    end
+
+    -- 2. Texto del HUD: "Strength: 12" o "STR 12".
+    local playerGui = Player:FindFirstChildOfClass("PlayerGui")
+
+    if playerGui then
+        for _, object in ipairs(playerGui:GetDescendants()) do
+            if object:IsA("TextLabel") and object.Text ~= "" then
+                local text = object.Text:lower()
+
+                if text:find(wanted, 1, true) then
+                    local number = text:match("(%d+%.?%d*)")
+
+                    if number then
+                        return tonumber(number), object:GetFullName()
+                    end
                 end
-
-                return
             end
-
-            sent += 1
-            State.Stats.Trains += 1
-            task.wait(0.2)
         end
+    end
 
-        if not silent then
-            Notify(
-                "Entrenamiento",
-                stat .. ": " .. tostring(sent) .. " solicitudes enviadas."
-            )
-        end
-    end)
+    return nil
 end
-
--- ============================================================
--- COMBATE
--- ============================================================
 
 local EnemyFolders = {"BadGuys", "BadGuysBoss", "BadGuysFront"}
 
@@ -718,7 +506,6 @@ local function GetEnemies()
 
     Add(Workspace:FindFirstChild("BadGuyPizza", true))
     Add(Workspace:FindFirstChild("BadGuyBrute", true))
-    Add(Workspace:FindFirstChild("BadGuyBrute2", true))
 
     return enemies
 end
@@ -741,8 +528,26 @@ local function GetEnemyRoot(npc)
     return nil
 end
 
+local function GetEnemyHumanoid(npc)
+    if not npc then
+        return nil
+    end
+
+    if npc:IsA("Humanoid") then
+        return npc
+    end
+
+    return npc:FindFirstChildOfClass("Humanoid")
+end
+
+local function EnemyHealth(npc)
+    local humanoid = GetEnemyHumanoid(npc)
+
+    return humanoid and humanoid.Health or 0
+end
+
 local function IsEnemyAlive(npc)
-    local humanoid = npc:FindFirstChildOfClass("Humanoid")
+    local humanoid = GetEnemyHumanoid(npc)
 
     if humanoid then
         return humanoid.Health > 0
@@ -751,457 +556,12 @@ local function IsEnemyAlive(npc)
     return true
 end
 
-local function AttackEnemies(silent)
-    local root = GetRoot()
-
-    if not root then
-        return 0
-    end
-
-    local remote, err = FindRemote("Events", "HitBadguy")
-
-    if not remote then
-        RememberMissing("Events.HitBadguy")
-
-        if not silent then
-            Notify("Combate", err)
-        end
-
-        return 0
-    end
-
-    local hit = 0
-    local damage = State.AttackDamage
-    local burst = math.clamp(State.AttackBurst, 1, 10)
-    local enemies = GetEnemies()
-
-    for _, npc in ipairs(enemies) do
-        if not State.Running then
-            break
-        end
-
-        local part = GetEnemyRoot(npc)
-
-        if part and IsEnemyAlive(npc) then
-            local distance = (part.Position - root.Position).Magnitude
-
-            if distance <= State.AttackRadius then
-                for _ = 1, burst do
-                    local ok = pcall(function()
-                        -- El remoto espera el modelo del NPC, no la parte.
-                        remote:FireServer(npc, damage, 4)
-                    end)
-
-                    if ok then
-                        hit += 1
-                        State.Stats.Damage += damage
-                    end
-                end
-            end
-        end
-    end
-
-    if not silent then
-        Notify(
-            "Combate",
-            tostring(hit) .. " golpes enviados a "
-                .. tostring(#enemies) .. " NPC."
-        )
-    end
-
-    return hit
-end
-
-local function KillAllEnemies(silent)
-    local before = #GetEnemies()
-    local hit = AttackEnemies(true)
-
-    -- El servidor no confirma la muerte: se espera un instante y se cuenta
-    -- lo que realmente desapareció del mapa.
-    task.wait(0.2)
-
-    local after = #GetEnemies()
-    local killed = math.max(before - after, 0)
-
-    State.Stats.Kills += killed
-
-    if not silent then
-        Notify(
-            "Combate",
-            tostring(hit) .. " golpes enviados | "
-                .. tostring(killed) .. "/" .. tostring(before) .. " NPC caídos."
-        )
-    end
-
-    return hit
-end
-
--- Traer NPC al jugador: solo funciona si el modelo no está anclado en el servidor.
-local function BringEnemies()
-    local root = GetRoot()
-
-    if not root then
-        return 0
-    end
-
-    local moved = 0
-
-    for _, npc in ipairs(GetEnemies()) do
-        if npc:IsA("Model") and IsEnemyAlive(npc) then
-            local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-
-            if npcRoot then
-                local ok = pcall(function()
-                    npcRoot.CFrame = root.CFrame * CFrame.new(0, 0, -4)
-                end)
-
-                if ok then
-                    moved += 1
-                end
-            end
-        end
-    end
-
-    if moved == 0 then
-        Notify("Combate", "No hay NPC vivos para mover.")
-    else
-        Notify(
-            "Combate",
-            tostring(moved) .. " NPC movidos en el cliente. "
-                .. "Si están anclados en el servidor, vuelven a su sitio."
-        )
-    end
-
-    return moved
-end
-
--- ============================================================
--- AMBIENTE: VIENTO / LODO / HIELO
--- ============================================================
-
--- Todo esto es local: toca partes del mapa que el cliente ve.
-
-local function RemoveWind()
-    local wave = Workspace:FindFirstChild("WavePart")
-
-    if not wave then
-        return false
-    end
-
-    local hail = Workspace:FindFirstChild("Hails")
-
-    if hail then
-        pcall(function()
-            hail:Destroy()
-        end)
-    end
-
-    pcall(function()
-        wave.CanTouch = false
-    end)
-
-    return true
-end
-
-local function RemoveMud()
-    local bog = Workspace:FindFirstChild("BogArea")
-
-    if not bog then
-        return 0
-    end
-
-    local cleared = 0
-
-    for _, object in ipairs(bog:GetDescendants()) do
-        if object.Name == "Mud" and object:IsA("BasePart") then
-            pcall(function()
-                object.CanTouch = false
-            end)
-
-            cleared += 1
-        end
-    end
-
-    return cleared
-end
-
-local function PushEnemiesBack(direction, force)
-    local root = GetRoot()
-
-    if not root then
-        return 0
-    end
-
-    local pushed = 0
-
-    for _, npc in ipairs(GetEnemies()) do
-        if npc:IsA("Model") and IsEnemyAlive(npc) then
-            local npcRoot = npc:FindFirstChild("HumanoidRootPart")
-
-            if npcRoot then
-                pcall(function()
-                    npcRoot.AssemblyLinearVelocity =
-                        npcRoot.AssemblyLinearVelocity
-                        + direction.Unit * force
-                end)
-
-                pushed += 1
-            end
-        end
-    end
-
-    return pushed
-end
-
--- ============================================================
--- ÁRBOLES / BARRICADAS
--- ============================================================
-
-local function BreakBarricades()
-    local folder = Workspace:FindFirstChild("FallenTrees")
-
-    if not folder then
-        Notify("Barricadas", "No hay FallenTrees en este mapa.")
-        return 0
-    end
-
-    local sent = 0
-
-    for _, tree in ipairs(folder:GetChildren()) do
-        local hitPart = tree:FindFirstChild("TreeHitPart")
-
-        if hitPart then
-            for _ = 1, 20 do
-                if Event("RoadMissionEvent", 1, hitPart, 5) then
-                    sent += 1
-                else
-                    break
-                end
-            end
-        end
-    end
-
-    Notify("Barricadas", tostring(sent) .. " golpes enviados.")
-
-    return sent
-end
-
--- ============================================================
--- COMIDA DE COCINA
--- ============================================================
-
-local function SpawnFood(item2, placement)
-    placement = tonumber(placement) or State.FoodPlacement
-
-    local ok, err = Event("OutsideFood", 6, {
-        item2 = item2,
-        placement = placement,
-    })
-
-    if not ok then
-        Notify("Comida", err)
-    end
-
-    return ok
-end
-
--- ============================================================
--- FINAL SECRETO
--- ============================================================
-
-local SecretEndingKeys = {
-    "HatCollected",
-    "MaskCollected",
-    "CrowbarCollected",
-}
-
-local function UnlockSecretEnding()
-    local sent = 0
-
-    for _, key in ipairs(SecretEndingKeys) do
-        if Event("LarryEndingEvent", key, true) then
-            sent += 1
-        end
-    end
-
-    if sent > 0 then
-        Notify("Final secreto", tostring(sent) .. "/3 eventos enviados.")
-    end
-
-    return sent
-end
-
--- ============================================================
--- ESP
--- ============================================================
-
-local VisualFolder = Instance.new("Folder")
-VisualFolder.Name = "VANTA_BI2_ESP"
-VisualFolder.Parent = Workspace
-
-local function MakeHighlight(adornee, fill, outline, transparency)
-    local highlight = Instance.new("Highlight")
-    highlight.Name = "VANTA_Highlight"
-    highlight.Adornee = adornee
-    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-    highlight.FillColor = fill
-    highlight.OutlineColor = outline
-    highlight.FillTransparency = transparency or 0.75
-    highlight.OutlineTransparency = 0
-    highlight.Parent = VisualFolder
-
-    return highlight
-end
-
-local function RemoveESP(target)
-    local object = State.ESPObjects[target]
-
-    if object then
-        object:Destroy()
-        State.ESPObjects[target] = nil
-    end
-end
-
-local function RefreshESP(target)
-    RemoveESP(target)
-
-    if not State.Running
-        or not State.ESP
-        or target == Player
-        or not target.Character
-    then
-        return
-    end
-
-    State.ESPObjects[target] = MakeHighlight(
-        target.Character,
-        Color3.fromRGB(100, 180, 255),
-        Color3.fromRGB(220, 240, 255),
-        0.8
-    )
-end
-
-local function ClearEnemyESP()
-    for npc, object in pairs(State.EnemyESPObjects) do
-        if object then
-            pcall(function()
-                object:Destroy()
-            end)
-        end
-
-        State.EnemyESPObjects[npc] = nil
-    end
-end
-
-local function RefreshEnemyESP()
-    if not State.EnemyESP then
-        ClearEnemyESP()
-        return
-    end
-
-    local alive = {}
-
-    for _, npc in ipairs(GetEnemies()) do
-        if IsEnemyAlive(npc) and npc:IsA("Model") then
-            alive[npc] = true
-
-            if not State.EnemyESPObjects[npc] then
-                State.EnemyESPObjects[npc] = MakeHighlight(
-                    npc,
-                    Color3.fromRGB(255, 90, 90),
-                    Color3.fromRGB(255, 200, 200),
-                    0.7
-                )
-            end
-        end
-    end
-
-    for npc, object in pairs(State.EnemyESPObjects) do
-        if not alive[npc] or not npc.Parent then
-            pcall(function()
-                object:Destroy()
-            end)
-
-            State.EnemyESPObjects[npc] = nil
-        end
-    end
-end
-
-local function RefreshAllESP()
-    for _, target in ipairs(Players:GetPlayers()) do
-        RefreshESP(target)
-    end
-
-    RefreshEnemyESP()
-end
-
-local function TrackPlayer(target)
-    if target == Player then
-        return
-    end
-
-    Connect(target.CharacterAdded, function()
-        if State.Running then
-            RefreshESP(target)
-        end
-    end)
-
-    Connect(target.CharacterRemoving, function()
-        RemoveESP(target)
-    end)
-
-    if State.ESP then
-        RefreshESP(target)
-    end
-end
-
-for _, target in ipairs(Players:GetPlayers()) do
-    TrackPlayer(target)
-end
-
-Connect(Players.PlayerAdded, TrackPlayer)
-Connect(Players.PlayerRemoving, RemoveESP)
-
--- ============================================================
--- MOVIMIENTO
--- ============================================================
-
-local function RememberHumanoid(humanoid)
-    if humanoid and not State.HumanoidCache[humanoid] then
-        State.HumanoidCache[humanoid] = {
-            WalkSpeed = humanoid.WalkSpeed,
-            JumpPower = humanoid.JumpPower,
-            UseJumpPower = humanoid.UseJumpPower,
-        }
-    end
-end
-
-local function RestoreCollisions()
-    for part, original in pairs(State.CollisionCache) do
-        if part and part.Parent then
-            pcall(function()
-                part.CanCollide = original
-            end)
-        end
-    end
-
-    table.clear(State.CollisionCache)
-end
-
-local function RestoreLighting()
-    for property, value in pairs(OriginalLighting) do
-        pcall(function()
-            Lighting[property] = value
-        end)
-    end
-end
-
 local function FindPlayer(query)
-    if type(query) ~= "string" or query == "" then
+    if type(query) ~= "string" then
         return nil
     end
 
-    query = query:lower():gsub("^%s+", ""):gsub("%s+$", "")
+    query = query:lower():match("^%s*(.-)%s*$")
 
     if query == "" then
         return nil
@@ -1209,10 +569,7 @@ local function FindPlayer(query)
 
     for _, target in ipairs(Players:GetPlayers()) do
         if target ~= Player
-            and (
-                target.Name:lower() == query
-                or target.DisplayName:lower() == query
-            )
+            and (target.Name:lower() == query or target.DisplayName:lower() == query)
         then
             return target
         end
@@ -1232,80 +589,503 @@ local function FindPlayer(query)
     return nil
 end
 
-local function TeleportToPlayer()
-    local root = GetRoot()
+-- ============================================================
+-- EJECUTORES VERIFICADOS
+-- ============================================================
+-- Cada uno devuelve: ejecutado (bool), detalle (string).
+-- Ninguno devuelve "enviado". Devuelven lo que ocurrió.
 
-    if not root then
-        Notify("Teleport", "No hay personaje.")
-        return
-    end
-
-    if State.SelectedPlayer == "" then
-        Notify("Teleport", "Escribe un nombre primero.")
-        return
-    end
-
-    local target = FindPlayer(State.SelectedPlayer)
-
-    local targetRoot = target
-        and target.Character
-        and target.Character:FindFirstChild("HumanoidRootPart")
-
-    if not target or not targetRoot then
-        Notify("Teleport", "Jugador o personaje no encontrado.")
-        return
-    end
-
-    root.CFrame = targetRoot.CFrame * CFrame.new(3, 0, 0)
-    Notify("Teleport", "Movido a " .. target.Name)
-end
-
-local PlaceCFrames = {
-    {name = "Tienda", cframe = CFrame.new(-246.653229, 30.4500484, -847.319275, 0.999987781, -9.18427645e-08, -0.00494772941, 9.19905787e-08, 1, 2.96483353e-08, 0.00494772941, -3.01031164e-08, 0.999987781)},
-    {name = "Cocina", cframe = CFrame.new(-249.753555, 30.4500484, -732.703125, -0.999205947, -1.97705017e-08, 0.0398429185, -2.00601384e-08, 1, -6.86967372e-09, -0.0398429185, -7.66347341e-09, -0.999205947)},
-    {name = "Arena de pelea", cframe = CFrame.new(-255.521988, 62.7139359, -723.436035, -0.0542500541, 4.28905356e-09, -0.998527408, 1.07862625e-08, 1, 3.70936082e-09, 0.998527408, -1.05691456e-08, -0.0542500541)},
-    {name = "Gimnasio", cframe = CFrame.new(-256.477448, 63.4500465, -840.825562, 0.999789953, 2.17116263e-08, 0.020495005, -2.15169358e-08, 1, -9.7199333e-09, -0.020495005, 9.27690191e-09, 0.999789953)},
-    {name = "Habitación central", cframe = CFrame.new(-209.951859, 30.4590473, -789.723877, -0.0485812724, 6.74905039e-08, 0.998819232, 1.19352916e-09, 1, -6.75122394e-08, -0.998819232, -2.08771045e-09, -0.0485812724)},
-    {name = "Pelea de jefe", cframe = CFrame.new(-1565.78772, -368.711945, -1040.66626, 0.0929690823, -1.97564436e-08, 0.995669007, -1.53269308e-08, 1, 2.1273511e-08, -0.995669007, -1.72383299e-08, 0.0929690823)},
-    {name = "Pilar de Scary Mary", cframe = CFrame.new(-1501.49597, -325.156891, -1060.63367, -0.691015959, 7.43958628e-09, 0.722839475, -5.03345055e-09, 1, -1.51040194e-08, -0.722839475, -1.40754954e-08, -0.691015959)},
-    {name = "Agente Bradley", cframe = CFrame.new(-281.792053, 95.4500275, -790.556946, -0.116918251, -7.95074726e-08, -0.993141532, -2.79918044e-09, 1, -7.97270019e-08, 0.993141532, -6.54155974e-09, -0.116918251)},
-    {name = "Twando (perro)", cframe = CFrame.new(-257.56839, 29.4499969, -910.452637, -0.238445505, 7.71292363e-09, 0.971155882, 1.2913591e-10, 1, -7.91029819e-09, -0.971155882, -1.76076387e-09, -0.238445505)},
-    {name = "Tío Pete", cframe = CFrame.new(-294.208923, 63.4182587, -737.712036, -0.998669028, -7.34403613e-08, -0.05157727, -7.2258743e-08, 1, -2.47743781e-08, 0.05157727, -2.1014495e-08, -0.998669028)},
-    {name = "Palanca dorada", cframe = CFrame.new(-147.337204, 29.4477005, -929.365295, 0.756779075, 4.53537341e-09, -0.653670728, 5.82708326e-09, 1, 1.36845468e-08, 0.653670728, -1.4165173e-08, 0.756779075)},
-    {name = "Máscara morada", cframe = CFrame.new(102.560722, 29.2477055, -976.389954, -0.951403797, 3.76210636e-08, -0.307946175, 1.89752569e-08, 1, 6.35433466e-08, 0.307946175, 5.46120233e-08, -0.951403797)},
-    {name = "Golden Apple", cframe = CFrame.new(61.8781624, 29.4499969, -534.381165, -0.584439218, -1.05103076e-07, 0.811437488, -3.12853778e-08, 1, 1.06993674e-07, -0.811437488, 3.71451705e-08, -0.584439218)},
+local Weapons = {
+    ["Crowbar 1"] = "Crowbar1",
+    ["Crowbar 2"] = "Crowbar2",
+    ["Bat"] = "Bat",
+    ["Pitchfork"] = "Pitchfork",
+    ["Hammer"] = "Hammer",
+    ["Wrench"] = "Wrench",
+    ["Broom"] = "Broom",
 }
 
-local function TeleportTo(placeName)
-    local root = GetRoot()
+local Items = {
+    "Golden Apple",
+    "Gold Pizza",
+    "Rainbow Pizza",
+    "Rainbow Pizza Box",
+    "Pizza",
+    "Cookie",
+    "Apple",
+    "Chips",
+    "Lollipop",
+    "Bloxy Cola",
+    "Expired Bloxy Cola",
+    "Bottle",
+    "Battery",
+    "Med Kit",
+    "Armor",
+    "Key",
+    "Gold Key",
+    "Louise",
+    "Book",
+    "Phone",
+    "Ladder",
+    "Crowbar 1",
+    "Crowbar 2",
+    "Bat",
+    "Pitchfork",
+    "Hammer",
+    "Wrench",
+    "Broom",
+}
 
-    if not root then
-        Notify("Teleport", "No hay personaje.")
-        return
+-- OBJETOS ----------------------------------------------------
+-- Vía 1: GiveTool(nombre). Vía 2: Vending(...) para armas y armadura.
+-- Se verifica leyendo la mochila. Si la vía 1 no deja el ítem, se usa la 2.
+
+local function ExecGiveItem(item)
+    if type(item) ~= "string" or item == "" then
+        return false, "ítem inválido"
     end
 
-    for _, place in ipairs(PlaceCFrames) do
-        if place.name == placeName then
-            root.CFrame = place.cframe
-            Notify("Teleport", placeName)
-            return
+    -- Si ya lo tienes, no se pide: se ejecuta sacándolo al personaje.
+    local existing = FindToolIn(item)
+
+    if existing then
+        local character = GetCharacter()
+
+        if character and existing.Parent ~= character then
+            pcall(function()
+                existing.Parent = character
+            end)
+        end
+
+        return true, item .. " ya estaba; equipado"
+    end
+
+    local name = ToolName(item)
+    local attempts = 0
+
+    -- Vía principal.
+    attempts += 1
+    Evt("GiveTool", name)
+
+    if Await(item, function()
+        return FindToolIn(item) ~= nil
+    end, 1.2) then
+        return true, item .. " en la mochila (GiveTool)"
+    end
+
+    -- Vía de respaldo para armas y armadura.
+    State.Stats.Retries += 1
+    attempts += 1
+
+    if item == "Armor" then
+        Evt("Vending", 3, "Armor2", "Armor", Player.Name, 1)
+    elseif Weapons[item] then
+        Evt("Vending", 3, Weapons[item], "Weapons", Player.Name, 1)
+    end
+
+    if Await(item, function()
+        return FindToolIn(item) ~= nil
+    end, 1.5) then
+        return true, item .. " en la mochila (Vending)"
+    end
+
+    -- Última vía: el nombre con espacios por si el servidor no normaliza.
+    if name ~= item then
+        State.Stats.Retries += 1
+        attempts += 1
+        Evt("GiveTool", item)
+
+        if Await(item, function()
+            return FindToolIn(item) ~= nil
+        end, 1.0) then
+            return true, item .. " en la mochila (nombre con espacios)"
         end
     end
+
+    return false, item .. " no llegó tras " .. attempts .. " vías"
 end
 
-Connect(RunService.Stepped, function()
-    if not State.Running then
+-- CURA -------------------------------------------------------
+-- La vida es la prueba. Si Energy no mueve la barra, se sube de ítem.
+
+local HealLadder = {
+    {item = "Pizza",  amount = 25},
+    {item = "Gold Pizza", amount = 50},
+    {item = "Rainbow Pizza", amount = 75},
+}
+
+local function ExecHeal(amount)
+    if not Alive() then
+        return false, "sin personaje vivo"
+    end
+
+    amount = tonumber(amount) or 25
+
+    local before = ReadHealth()
+    local maxHealth = ReadMaxHealth()
+
+    if before >= maxHealth then
+        return true, "ya estaba a " .. tostring(math.floor(before)) .. " HP"
+    end
+
+    for index, step in ipairs(HealLadder) do
+        local healFor = math.max(amount, step.amount)
+
+        -- Solo pide el ítem si no lo tiene: pedirlo cada tick es lo que
+        -- hace que el servidor te trate como flood.
+        if not FindToolIn(step.item) then
+            Evt("GiveTool", ToolName(step.item))
+            Await(step.item, function()
+                return FindToolIn(step.item) ~= nil
+            end, 0.8)
+        end
+
+        Evt("Energy", healFor, step.item)
+
+        if Await("heal", function()
+            return ReadHealth() > before + 0.5
+        end, 1.2) then
+            return true, string.format(
+                "+%d HP con %s (%d → %d)",
+                math.floor(ReadHealth() - before),
+                step.item,
+                math.floor(before),
+                math.floor(ReadHealth())
+            )
+        end
+
+        if index < #HealLadder then
+            State.Stats.Retries += 1
+        end
+    end
+
+    return false, "Energy no movió la vida con ningún ítem"
+end
+
+-- CURAR A TODOS ----------------------------------------------
+-- Manzana dorada + HealTheNoobs. Se verifica con la vida de los NPC
+-- aliados si el juego los expone; si no, se verifica que la manzana
+-- se haya equipado, que es la precondición real del remoto.
+
+local function ExecHealEveryone()
+    if not Alive() then
+        return false, "sin personaje vivo"
+    end
+
+    local humanoid = GetHumanoid()
+
+    if humanoid then
+        pcall(function()
+            humanoid:UnequipTools()
+        end)
+
+        task.wait(0.15)
+    end
+
+    local backpack = GetBackpack()
+
+    if not backpack then
+        return false, "sin mochila"
+    end
+
+    local apple = backpack:FindFirstChild("GoldenApple")
+
+    if not apple then
+        Evt("GiveTool", "GoldenApple")
+
+        local got = Await("apple", function()
+            local bag = GetBackpack()
+
+            return bag and bag:FindFirstChild("GoldenApple") ~= nil
+        end, 2.0)
+
+        if not got then
+            return false, "la manzana dorada no llegó"
+        end
+
+        backpack = GetBackpack()
+        apple = backpack and backpack:FindFirstChild("GoldenApple")
+    end
+
+    if not apple then
+        return false, "la manzana no está en la mochila"
+    end
+
+    local character = GetCharacter()
+    local equipped = false
+
+    if character then
+        pcall(function()
+            apple.Parent = character
+        end)
+
+        -- Parent es la prueba directa; FindFirstChild puede tardar un frame
+        -- en reflejar el cambio, así que se acepta cualquiera de las dos.
+        equipped = Await("equip", function()
+            return apple.Parent == character
+                or character:FindFirstChild("GoldenApple") ~= nil
+        end, 1.0)
+    end
+
+    if not equipped then
+        return false, "no se pudo equipar la manzana"
+    end
+
+    task.wait(0.25)
+
+    if not Evt("HealTheNoobs") then
+        return false, "HealTheNoobs no existe en este lugar"
+    end
+
+    -- Verificación real si el juego expone NPC aliados.
+    local healed = Await("allies", function()
+        for _, name in ipairs({"Noobs", "Allies", "Survivors", "Players"}) do
+            local folder = Workspace:FindFirstChild(name)
+
+            if folder then
+                for _, npc in ipairs(folder:GetChildren()) do
+                    local npcHumanoid = GetEnemyHumanoid(npc)
+
+                    if npcHumanoid and npcHumanoid.Health < npcHumanoid.MaxHealth then
+                        return false
+                    end
+                end
+
+                return true
+            end
+        end
+
+        return nil
+    end, 1.5)
+
+    if healed then
+        return true, "grupo curado (verificado en aliados)"
+    end
+
+    return true, "manzana equipada y HealTheNoobs disparado"
+end
+
+-- ENTRENAMIENTO ----------------------------------------------
+-- Se verifica contra el stat si el cliente lo expone. Si no lo expone,
+-- se reintenta hasta agotar el presupuesto y se informa sin adornos.
+
+local function ExecTrain(stat, reps)
+    reps = math.clamp(tonumber(reps) or 5, 1, 100)
+
+    local before, source = ReadStat(stat)
+    local done = 0
+
+    for _ = 1, reps do
+        if not State.Running then
+            break
+        end
+
+        if not Evt("RainbowWhatStat", stat) then
+            return false, "RainbowWhatStat no existe en este lugar"
+        end
+
+        done += 1
+
+        -- Sin stat legible no hay nada que verificar: se espacia para no
+        -- reventar el presupuesto y se sigue.
+        task.wait(before and 0.25 or 0.2)
+    end
+
+    if before then
+        local after = ReadStat(stat)
+
+        if after and after > before then
+            return true, string.format(
+                "%s %d → %d (+%d) en %d envíos",
+                stat,
+                math.floor(before),
+                math.floor(after),
+                math.floor(after - before),
+                done
+            )
+        end
+
+        return false, string.format(
+            "%s no subió (%d copias enviadas) — el servidor lo está ignorando",
+            stat,
+            done
+        )
+    end
+
+    return true, string.format(
+        "%s: %d copias (sin stat legible para verificar)",
+        stat,
+        done
+    )
+end
+
+-- COMBATE ----------------------------------------------------
+-- Tres formas de argumento. Se prueban hasta que el Humanoid baje.
+
+local function ExecAttackOne(npc, damage, burst)
+    local humanoid = GetEnemyHumanoid(npc)
+
+    if not humanoid or humanoid.Health <= 0 then
+        return false, "sin vida", false
+    end
+
+    local before = humanoid.Health
+    local root = GetRoot()
+
+    if root then
+        local part = GetEnemyRoot(npc)
+
+        if part and (part.Position - root.Position).Magnitude > State.AttackRadius then
+            return false, "fuera de radio", false
+        end
+    end
+
+    -- Forma 1: el modelo. Es la que documenta el juego.
+    for _ = 1, math.clamp(burst, 1, 10) do
+        Evt("HitBadguy", npc, damage, 4)
+    end
+
+    if Await("hit1", function()
+        return humanoid.Health < before
+    end, 0.5) then
+        return true, string.format("%d → %d", math.floor(before), math.floor(humanoid.Health))
+    end
+
+    -- Forma 2: la parte raíz. Algunas versiones la esperan.
+    State.Stats.Retries += 1
+    local part = GetEnemyRoot(npc)
+
+    if part then
+        for _ = 1, 2 do
+            Evt("HitBadguy", part, damage, 4)
+        end
+
+        if Await("hit2", function()
+            return humanoid.Health < before
+        end, 0.6) then
+            return true, string.format(
+                "%d → %d (por parte)",
+                math.floor(before),
+                math.floor(humanoid.Health)
+            )
+        end
+    end
+
+    -- Forma 3: sin el tercer argumento.
+    State.Stats.Retries += 1
+    Evt("HitBadguy", npc, damage)
+
+    if Await("hit3", function()
+        return humanoid.Health < before
+    end, 0.6) then
+        return true, string.format(
+            "%d → %d (2 args)",
+            math.floor(before),
+            math.floor(humanoid.Health)
+        )
+    end
+
+    -- Última vía: si el Humanoid está replicado en el cliente, se escribe.
+    -- El servidor puede revertirlo. Se marca como local para que el
+    -- contador de caídos no te mienta.
+    if humanoid.Health > 0 then
+        pcall(function()
+            humanoid.Health = 0
+        end)
+
+        if humanoid.Health < before then
+            return true, string.format(
+                "%d → %d (local)",
+                math.floor(before),
+                math.floor(humanoid.Health)
+            ), true
+        end
+    end
+
+    return false, "el remoto no bajó la vida y el cliente no la aceptó", false
+end
+
+local function ExecAttackAll(damage, burst, silent)
+    local total = 0
+    local killed = 0
+    local local_only = 0
+    local failed = 0
+
+    for _, npc in ipairs(GetEnemies()) do
+        if not State.Running then
+            break
+        end
+
+        if IsEnemyAlive(npc) then
+            local ok, _, isLocal = ExecAttackOne(npc, damage, burst)
+
+            if ok then
+                total += 1
+
+                if isLocal then
+                    local_only += 1
+                elseif not IsEnemyAlive(npc) then
+                    killed += 1
+                end
+            else
+                failed += 1
+            end
+        end
+    end
+
+    local detail = string.format("%d dañados, %d caídos", total, killed)
+
+    if local_only > 0 then
+        detail = detail .. string.format(", %d solo en cliente", local_only)
+    end
+
+    if failed > 0 then
+        detail = detail .. string.format(", %d sin efecto", failed)
+    end
+
+    -- Solo cuenta como ejecutado lo que el servidor confirmó con vida bajada.
+    local verified = killed > 0 or (total > 0 and local_only == 0)
+
+    if not silent then
+        Report("Combate", verified, detail)
+    end
+
+    return verified, detail
+end
+
+-- ============================================================
+-- PROPIEDADES LOCALES: EJECUTAR, NO PEDIR
+-- ============================================================
+-- RunService.Stepped reescribe cada frame. Sin remoto, sin rechazo.
+
+local function CaptureOriginals(humanoid)
+    if not humanoid then
         return
     end
 
+    if State.HumanoidCache[humanoid] then
+        return
+    end
+
+    State.HumanoidCache[humanoid] = true
+    State.OriginalSpeed = humanoid.WalkSpeed
+    State.OriginalJump = humanoid.JumpPower
+    State.OriginalUseJumpPower = humanoid.UseJumpPower
+end
+
+local function ApplyLocalState()
     local humanoid = GetHumanoid()
     local character = GetCharacter()
 
     if humanoid then
-        RememberHumanoid(humanoid)
+        CaptureOriginals(humanoid)
 
-        if State.SpeedEnabled and humanoid.WalkSpeed ~= State.Speed then
-            humanoid.WalkSpeed = State.Speed
+        if State.SpeedEnabled then
+            if humanoid.WalkSpeed ~= State.Speed then
+                humanoid.WalkSpeed = State.Speed
+            end
+        elseif humanoid.WalkSpeed ~= State.OriginalSpeed then
+            humanoid.WalkSpeed = State.OriginalSpeed
         end
 
         if State.JumpEnabled then
@@ -1316,6 +1096,9 @@ Connect(RunService.Stepped, function()
             if humanoid.JumpPower ~= State.Jump then
                 humanoid.JumpPower = State.Jump
             end
+        elseif humanoid.JumpPower ~= State.OriginalJump then
+            humanoid.JumpPower = State.OriginalJump
+            humanoid.UseJumpPower = State.OriginalUseJumpPower
         end
     end
 
@@ -1331,101 +1114,297 @@ Connect(RunService.Stepped, function()
                 end
             end
         end
+
+        if humanoid then
+            pcall(function()
+                humanoid:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+            end)
+        end
+    elseif not State.Noclip then
+        for part, original in pairs(State.CollisionCache) do
+            if part and part.Parent and part.CanCollide ~= original then
+                pcall(function()
+                    part.CanCollide = original
+                end)
+            end
+        end
+    end
+
+    if State.Fullbright then
+        if Lighting.Brightness ~= 3 then
+            Lighting.Brightness = 3
+        end
+
+        if Lighting.ClockTime ~= 14 then
+            Lighting.ClockTime = 14
+        end
+
+        if Lighting.FogEnd ~= 100000 then
+            Lighting.FogEnd = 100000
+        end
+
+        if Lighting.GlobalShadows then
+            Lighting.GlobalShadows = false
+        end
+    end
+end
+
+Connect(RunService.Stepped, function()
+    if State.Running then
+        ApplyLocalState()
     end
 end)
 
--- Salto infinito: una sola conexión, controlada por el flag.
+-- Salto infinito: una sola conexión, siempre activa, controlada por el flag.
 Connect(UserInputService.JumpRequest, function()
-    if State.Running and State.InfJump then
-        local humanoid = GetHumanoid()
+    if not State.Running or not State.InfJump then
+        return
+    end
 
-        if humanoid and humanoid.Health > 0 then
-            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-        end
+    local humanoid = GetHumanoid()
+
+    if humanoid and humanoid.Health > 0 then
+        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
     end
 end)
 
 -- ============================================================
--- TABS
+-- ESP
+-- ============================================================
+
+local VisualFolder = Instance.new("Folder")
+VisualFolder.Name = "VANTA_BI2"
+VisualFolder.Parent = Workspace
+
+local function RemoveESP(target)
+    local object = State.ESPObjects[target]
+
+    if object then
+        pcall(function()
+            object:Destroy()
+        end)
+
+        State.ESPObjects[target] = nil
+    end
+end
+
+local function ApplyESP(target)
+    RemoveESP(target)
+
+    if not State.Running or not State.ESP or target == Player then
+        return
+    end
+
+    if not target.Character then
+        return
+    end
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "VANTA_HL"
+    highlight.Adornee = target.Character
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillColor = Color3.fromRGB(100, 180, 255)
+    highlight.OutlineColor = Color3.fromRGB(220, 240, 255)
+    highlight.FillTransparency = 0.8
+    highlight.OutlineTransparency = 0
+    highlight.Parent = VisualFolder
+
+    State.ESPObjects[target] = highlight
+end
+
+local function RefreshESP()
+    for _, target in ipairs(Players:GetPlayers()) do
+        ApplyESP(target)
+    end
+end
+
+local function TrackPlayer(target)
+    if target == Player then
+        return
+    end
+
+    Connect(target.CharacterAdded, function()
+        if State.Running and State.ESP then
+            ApplyESP(target)
+        end
+    end)
+
+    Connect(target.CharacterRemoving, function()
+        RemoveESP(target)
+    end)
+
+    if State.ESP then
+        ApplyESP(target)
+    end
+end
+
+for _, target in ipairs(Players:GetPlayers()) do
+    TrackPlayer(target)
+end
+
+Connect(Players.PlayerAdded, TrackPlayer)
+Connect(Players.PlayerRemoving, RemoveESP)
+
+-- ============================================================
+-- TELEPORT
+-- ============================================================
+
+local function ExecTeleportToPlayer()
+    local root = GetRoot()
+
+    if not root then
+        return false, "sin personaje"
+    end
+
+    if State.SelectedPlayer == "" then
+        return false, "escribe un nombre primero"
+    end
+
+    local target = FindPlayer(State.SelectedPlayer)
+
+    if not target then
+        return false, "jugador no encontrado"
+    end
+
+    local targetRoot = target.Character
+        and target.Character:FindFirstChild("HumanoidRootPart")
+
+    if not targetRoot then
+        return false, target.Name .. " no tiene personaje"
+    end
+
+    local destination = targetRoot.CFrame * CFrame.new(3, 0, 0)
+
+    for _ = 1, 3 do
+        root.CFrame = destination
+        task.wait(0.1)
+    end
+
+    -- Verificación: el root tiene que estar donde lo pusimos.
+    local ok = Await("tp", function()
+        return (root.Position - destination.Position).Magnitude < 12
+    end, 0.6)
+
+    if ok then
+        return true, "junto a " .. target.Name
+    end
+
+    return false, "el servidor devolvió el personaje (anti-teleport)"
+end
+
+-- ============================================================
+-- LOBBY
+-- ============================================================
+
+local RoleTools = {
+    Hacker = {arg = "Phone", tool = "Phone"},
+    Nerd = {arg = "Book", tool = "Book"},
+}
+
+local function ExecLobbyRole(roleName)
+    local role = RoleTools[roleName]
+
+    if not role then
+        return false, "rol desconocido"
+    end
+
+    -- Verificación directa: si ya tienes la herramienta del rol, ya lo eres.
+    if FindToolIn(role.tool) then
+        return true, "ya tienes " .. roleName
+    end
+
+    if not Emit("RemoteEvents", "OutsideRole", role.arg, true, false) then
+        -- Algunas versiones del lobby usan solo el ítem.
+        State.Stats.Retries += 1
+        Emit("RemoteEvents", "OutsideRole", role.arg)
+    end
+
+    -- La prueba del rol es la herramienta del gamepass.
+    local got = Await("role", function()
+        return FindToolIn(role.tool) ~= nil
+    end, 2.5)
+
+    if got then
+        return true, "rol " .. roleName .. " activo"
+    end
+
+    return false, "el lobby no entregó " .. roleName
+        .. " (¿gamepass o lobby equivocado?)"
+end
+
+-- ============================================================
+-- UI
 -- ============================================================
 
 local TabMain = Window:CreateTab({name = "Inicio"})
 local TabSurvival = Window:CreateTab({name = "Supervivencia"})
 local TabItems = Window:CreateTab({name = "Objetos"})
 local TabCombat = Window:CreateTab({name = "Combate"})
-local TabWorld = Window:CreateTab({name = "Mundo"})
 local TabMove = Window:CreateTab({name = "Movimiento"})
 local TabVisuals = Window:CreateTab({name = "Visuales"})
 local TabLobby = Window:CreateTab({name = "Lobby"})
 local TabDiag = Window:CreateTab({name = "Diagnóstico"})
 
+-- Los botones nunca bloquean la UI: cada ejecución corre en su hilo
+-- y notifica el resultado real cuando termina.
+local function Async(title, executor)
+    return function()
+        task.spawn(function()
+            Safe(title, function()
+                local ok, detail = executor()
+                Report(title, ok, detail)
+            end)
+        end)
+    end
+end
+
 TabMain:CreateText({
     name = "VANTA | BREAK IN 2",
-    text = "Remotos verificados sobre la historia y el lobby. "
-        .. "Lo que es solo local (movimiento, noclip, luz, ESP) no toca el servidor.",
+    text = "Cada acción dispara, verifica y reintenta por otra vía. "
+        .. "Si no ocurre, lo dice.",
 })
 
 TabMain:CreateText({
     name = "Hooks",
     text = HookAvailable
         and "Disponibles: semi godmode y anti-slip activos."
-        or "El executor no expone hookmetamethod. Semi godmode y anti-slip quedan apagados.",
+        or "Este executor no expone hookmetamethod: semi godmode y anti-slip quedan fuera.",
 })
 
-local function DoQuickKit()
-    local character = GetCharacter()
-    local humanoid = GetHumanoid()
+TabMain:CreateButton({
+    name = "Kit completo (verificado)",
+    callback = Async("Kit", function()
+        local done = 0
+        local total = 0
 
-    if humanoid then
-        humanoid:UnequipTools()
-    end
+        for _, item in ipairs({"Armor", "Golden Apple", "Med Kit", "Crowbar 2"}) do
+            total += 1
 
-    task.spawn(function()
-        GiveItemRaw("Armor")
-        task.wait(0.2)
-        GiveItemRaw("Golden Apple")
-        task.wait(0.2)
-        GiveItemRaw("Med Kit")
-        task.wait(0.2)
-        GiveItemRaw("Crowbar 2")
-        task.wait(0.2)
-
-        -- Pizza de sobra: la usan la auto-curación y el heal.
-        for _ = 1, 8 do
-            GiveItemRaw("Gold Pizza")
-            task.wait(0.05)
+            if ExecGiveItem(item) then
+                done += 1
+            end
         end
 
-        Train("Strength", 5, true)
-        Train("Speed", 5, true)
+        for _ = 1, 6 do
+            ExecGiveItem("Gold Pizza")
+        end
 
-        Notify("Kit rápido", "Armor, curas, palanca y entrenamiento enviados.")
-    end)
-end
-
-TabMain:CreateButton({
-    name = "Kit rápido (armor + curas + arma + entrenamiento)",
-    callback = DoQuickKit,
+        return done > 0, string.format(
+            "%d/%d objetos del kit en la mochila",
+            done,
+            total
+        )
+    end),
 })
 
 TabMain:CreateButton({
-    name = "Entrenar fuerza y velocidad ×5",
-    callback = function()
-        Train("Strength", 5)
-        Train("Speed", 5)
-    end,
-})
+    name = "Entrenar fuerza y velocidad",
+    callback = Async("Entrenamiento", function()
+        local okA, detailA = ExecTrain("Strength", State.TrainAmount)
+        local okB, detailB = ExecTrain("Speed", State.TrainAmount)
 
-TabMain:CreateButton({
-    name = "Matar a todos los NPC cercanos",
-    callback = function()
-        KillAllEnemies(false)
-    end,
-})
-
-TabMain:CreateButton({
-    name = "Curar a todos (manzana dorada)",
-    callback = HealEveryone,
+        return okA or okB, tostring(detailA) .. " | " .. tostring(detailB)
+    end),
 })
 
 -- SUPERVIVENCIA
@@ -1435,7 +1414,7 @@ TabSurvival:CreateSection({name = "Protección"})
 TabSurvival:CreateToggle({
     name = "Semi godmode",
     description = HookAvailable
-        and "Convierte el daño negativo de Energy en 0."
+        and "Anula el daño negativo de Energy antes de que salga."
         or "Requiere hookmetamethod.",
     flag = "semiGod",
     value = false,
@@ -1443,7 +1422,7 @@ TabSurvival:CreateToggle({
         State.SemiGod = value and HookAvailable
 
         if value and not HookAvailable then
-            Notify("Semi godmode", "Hooks no disponibles en este executor.")
+            Notify("Semi godmode", "✖ este executor no tiene hooks")
         end
     end,
 })
@@ -1451,7 +1430,7 @@ TabSurvival:CreateToggle({
 TabSurvival:CreateToggle({
     name = "Anti-slip",
     description = HookAvailable
-        and "Bloquea el remoto IceSlip por completo."
+        and "Corta el remoto IceSlip completo."
         or "Requiere hookmetamethod.",
     flag = "antiSlip",
     value = false,
@@ -1459,7 +1438,7 @@ TabSurvival:CreateToggle({
         State.AntiSlip = value and HookAvailable
 
         if value and not HookAvailable then
-            Notify("Anti-slip", "Hooks no disponibles en este executor.")
+            Notify("Anti-slip", "✖ este executor no tiene hooks")
         end
     end,
 })
@@ -1468,26 +1447,26 @@ TabSurvival:CreateSection({name = "Curación"})
 
 TabSurvival:CreateButton({
     name = "Curarme ahora",
-    callback = function()
-        HealSelf(false)
-    end,
+    callback = Async("Curación", function()
+        return ExecHeal(State.HealAmount)
+    end),
 })
 
 TabSurvival:CreateSlider({
-    name = "Cantidad por cura",
+    name = "Curación por uso",
     range = {10, 150},
     increment = 5,
     value = 25,
     suffix = " HP",
     flag = "healAmount",
     callback = function(value)
-        State.AutoHealAmount = value
+        State.HealAmount = value
     end,
 })
 
 TabSurvival:CreateToggle({
     name = "Auto-curación",
-    description = "Manda pizza + Energy en bucle.",
+    description = "Solo actúa si estás herido. Verifica cada cura.",
     flag = "autoHeal",
     value = false,
     callback = function(value)
@@ -1508,14 +1487,14 @@ TabSurvival:CreateSlider({
 })
 
 TabSurvival:CreateButton({
-    name = "Curar a todos (manzana dorada)",
-    callback = HealEveryone,
+    name = "Curar a todos",
+    callback = Async("Curar a todos", ExecHealEveryone),
 })
 
 TabSurvival:CreateSection({name = "Entrenamiento"})
 
 TabSurvival:CreateSlider({
-    name = "Repeticiones por stat",
+    name = "Repeticiones",
     range = {1, 50},
     increment = 1,
     value = 5,
@@ -1527,30 +1506,22 @@ TabSurvival:CreateSlider({
 
 TabSurvival:CreateButton({
     name = "Entrenar fuerza",
-    callback = function()
-        Train("Strength", State.TrainAmount)
-    end,
+    callback = Async("Fuerza", function()
+        return ExecTrain("Strength", State.TrainAmount)
+    end),
 })
 
 TabSurvival:CreateButton({
     name = "Entrenar velocidad",
-    callback = function()
-        Train("Speed", State.TrainAmount)
-    end,
-})
-
-TabSurvival:CreateButton({
-    name = "Entrenar todo",
-    callback = function()
-        Train("Strength", State.TrainAmount)
-        Train("Speed", State.TrainAmount)
-    end,
+    callback = Async("Velocidad", function()
+        return ExecTrain("Speed", State.TrainAmount)
+    end),
 })
 
 -- OBJETOS
 
 TabItems:CreateDropdown({
-    name = "Seleccionar objeto",
+    name = "Objeto",
     options = Items,
     value = "Golden Apple",
     flag = "item",
@@ -1564,19 +1535,39 @@ TabItems:CreateDropdown({
 })
 
 TabItems:CreateButton({
-    name = "Dar objeto seleccionado",
-    callback = function()
-        if State.SelectedItem and GiveItem(State.SelectedItem) then
-            Notify("Objetos", "Solicitado: " .. State.SelectedItem)
-        end
-    end,
+    name = "Dar y equipar seleccionado",
+    callback = Async("Objeto", function()
+        return ExecGiveItem(State.SelectedItem)
+    end),
 })
 
 TabItems:CreateButton({
-    name = "Solicitar todos los objetos",
-    callback = function()
-        GiveList(Items, 0.2)
-    end,
+    name = "Dar todos los objetos",
+    callback = Async("Objetos", function()
+        local done, failed = 0, 0
+
+        for _, item in ipairs(Items) do
+            if not State.Running then
+                break
+            end
+
+            local ok = ExecGiveItem(item)
+
+            if ok then
+                done += 1
+            else
+                failed += 1
+            end
+
+            task.wait(0.15)
+        end
+
+        return done > 0, string.format(
+            "%d en mochila, %d rechazados",
+            done,
+            failed
+        )
+    end),
 })
 
 TabItems:CreateSection({name = "Acceso rápido"})
@@ -1591,55 +1582,21 @@ for _, item in ipairs({
     "Bat",
     "Key",
     "Gold Key",
-    "Louise",
 }) do
-    local currentItem = item
+    local current = item
 
     TabItems:CreateButton({
-        name = "Dar " .. currentItem,
-
-        callback = function()
-            if GiveItem(currentItem) then
-                Notify("Objetos", "Solicitado: " .. currentItem)
-            end
-        end,
+        name = current,
+        callback = Async(current, function()
+            return ExecGiveItem(current)
+        end),
     })
 end
-
-TabItems:CreateSection({name = "Cocina"})
-
-TabItems:CreateInput({
-    name = "Slot de la mesa",
-    placeholder = "1-4",
-    value = "1",
-    flag = "foodSlot",
-    callback = function(value)
-        State.FoodPlacement = tonumber(value) or 1
-    end,
-})
-
-TabItems:CreateButton({
-    name = "Spawnear caja de pizza",
-    callback = function()
-        if SpawnFood("Pizza") then
-            Notify("Comida", "Caja de pizza solicitada.")
-        end
-    end,
-})
-
-TabItems:CreateButton({
-    name = "Spawnear Bloxy Cola",
-    callback = function()
-        if SpawnFood("BloxyPack") then
-            Notify("Comida", "Pack de Bloxy Cola solicitado.")
-        end
-    end,
-})
 
 -- COMBATE
 
 TabCombat:CreateSlider({
-    name = "Radio de ataque",
+    name = "Radio",
     range = {10, 300},
     increment = 10,
     value = 150,
@@ -1651,7 +1608,7 @@ TabCombat:CreateSlider({
 })
 
 TabCombat:CreateSlider({
-    name = "Daño por golpe",
+    name = "Daño",
     range = {5, 100},
     increment = 5,
     value = 65,
@@ -1686,166 +1643,22 @@ TabCombat:CreateSlider({
 })
 
 TabCombat:CreateButton({
-    name = "Atacar NPC cercanos una vez",
-    callback = function()
-        AttackEnemies(false)
-    end,
-})
-
-TabCombat:CreateButton({
-    name = "Matar a todos (barrido completo)",
-    callback = function()
-        KillAllEnemies(false)
-    end,
+    name = "Atacar NPC cercanos",
+    callback = Async("Combate", function()
+        return ExecAttackAll(
+            State.AttackDamage,
+            State.AttackBurst,
+            true
+        )
+    end),
 })
 
 TabCombat:CreateToggle({
-    name = "Auto ataque NPC",
+    name = "Auto ataque",
     flag = "autoAttack",
     value = false,
     callback = function(value)
         State.AutoAttack = value
-    end,
-})
-
-TabCombat:CreateSection({name = "Utilidades"})
-
-TabCombat:CreateButton({
-    name = "Traer NPC al jugador (local)",
-    callback = BringEnemies,
-})
-
-TabCombat:CreateToggle({
-    name = "Congelar NPC",
-    description = "Ancla los HumanoidRootPart en el cliente. Local.",
-    flag = "freezeEnemies",
-    value = false,
-    callback = function(value)
-        State.FreezeEnemies = value
-
-        if not value then
-            for _, npc in ipairs(GetEnemies()) do
-                local npcRoot = npc:IsA("Model")
-                    and npc:FindFirstChild("HumanoidRootPart")
-
-                if npcRoot then
-                    pcall(function()
-                        npcRoot.Anchored = false
-                    end)
-                end
-            end
-        end
-    end,
-})
-
-TabCombat:CreateButton({
-    name = "Romper barricadas de árboles",
-    callback = BreakBarricades,
-})
-
--- MUNDO / TELEPORT
-
-TabWorld:CreateText({
-    name = "Teleports",
-    text = "Coordenadas de la historia. En el lobby no hacen nada útil.",
-})
-
-for _, place in ipairs(PlaceCFrames) do
-    local currentPlace = place.name
-
-    TabWorld:CreateButton({
-        name = currentPlace,
-        callback = function()
-            TeleportTo(currentPlace)
-        end,
-    })
-end
-
-TabWorld:CreateSection({name = "Ambiente (local)"})
-
-TabWorld:CreateToggle({
-    name = "Quitar viento y granizo",
-    description = "Mata Hails y desactiva el toque de WavePart.",
-    flag = "noWind",
-    value = false,
-    callback = function(value)
-        State.NoWind = value
-
-        if value then
-            local ok = RemoveWind()
-
-            if not ok then
-                Notify("Ambiente", "No hay viento en este mapa todavía.")
-            end
-        end
-    end,
-})
-
-TabWorld:CreateToggle({
-    name = "Quitar lodo",
-    description = "CanTouch = false en las partes Mud de BogArea.",
-    flag = "noMud",
-    value = false,
-    callback = function(value)
-        State.NoMud = value
-
-        if value then
-            local cleared = RemoveMud()
-
-            if cleared == 0 then
-                Notify("Ambiente", "No hay lodo en este mapa.")
-            else
-                Notify("Ambiente", tostring(cleared) .. " partes de lodo desactivadas.")
-            end
-        end
-    end,
-})
-
-TabWorld:CreateButton({
-    name = "Empujar NPC lejos",
-    description = "Impulso local sobre los enemigos vivos.",
-    callback = function()
-        local root = GetRoot()
-
-        if not root then
-            return
-        end
-
-        local pushed = PushEnemiesBack(root.CFrame.LookVector, 200)
-
-        Notify("Combate", tostring(pushed) .. " NPC empujados.")
-    end,
-})
-
-TabWorld:CreateSection({name = "Progreso"})
-
-TabWorld:CreateButton({
-    name = "Abrir final secreto",
-    description = "LarryEndingEvent con las tres claves.",
-    callback = UnlockSecretEnding,
-})
-
-TabWorld:CreateButton({
-    name = "Golpear puerta",
-    description = "OnDoorHit apuntando al modelo cercano o a la puerta del mapa.",
-    callback = function()
-        local root = GetRoot()
-
-        if not root then
-            return
-        end
-
-        -- Sin acceso a la puerta exacta: se manda el modelo del mapa si existe.
-        local door = Workspace:FindFirstChild("Door", true)
-            or Workspace:FindFirstChild("Doorframe", true)
-
-        if door then
-            if TryFire("Events", "OnDoorHit", door) then
-                Notify("Puerta", "OnDoorHit enviado.")
-            end
-        else
-            Notify("Puerta", "No se encontró una puerta en el mapa.")
-        end
     end,
 })
 
@@ -1863,23 +1676,18 @@ TabMove:CreateSlider({
 })
 
 TabMove:CreateToggle({
-    name = "Activar velocidad",
+    name = "Velocidad",
+    description = "Se reescribe cada frame. El servidor no lo puede rechazar.",
     flag = "speedEnabled",
     value = false,
     callback = function(value)
         State.SpeedEnabled = value
 
-        local humanoid = GetHumanoid()
+        if not value and State.OriginalSpeed then
+            local humanoid = GetHumanoid()
 
-        if humanoid then
-            RememberHumanoid(humanoid)
-
-            if not value then
-                local original = State.HumanoidCache[humanoid]
-
-                if original then
-                    humanoid.WalkSpeed = original.WalkSpeed
-                end
+            if humanoid then
+                humanoid.WalkSpeed = State.OriginalSpeed
             end
         end
     end,
@@ -1897,24 +1705,18 @@ TabMove:CreateSlider({
 })
 
 TabMove:CreateToggle({
-    name = "Activar salto",
+    name = "Salto",
     flag = "jumpEnabled",
     value = false,
     callback = function(value)
         State.JumpEnabled = value
 
-        local humanoid = GetHumanoid()
+        if not value then
+            local humanoid = GetHumanoid()
 
-        if humanoid then
-            RememberHumanoid(humanoid)
-
-            if not value then
-                local original = State.HumanoidCache[humanoid]
-
-                if original then
-                    humanoid.JumpPower = original.JumpPower
-                    humanoid.UseJumpPower = original.UseJumpPower
-                end
+            if humanoid then
+                humanoid.JumpPower = State.OriginalJump
+                humanoid.UseJumpPower = State.OriginalUseJumpPower
             end
         end
     end,
@@ -1922,7 +1724,6 @@ TabMove:CreateToggle({
 
 TabMove:CreateToggle({
     name = "Salto infinito",
-    description = "Local. Se puede saltar en el aire.",
     flag = "infJump",
     value = false,
     callback = function(value)
@@ -1932,20 +1733,16 @@ TabMove:CreateToggle({
 
 TabMove:CreateToggle({
     name = "Noclip",
-    description = "Local. Atraviesa paredes.",
+    description = "Colisiones a false cada frame y restauración al apagar.",
     flag = "noclip",
     value = false,
     callback = function(value)
         State.Noclip = value
-
-        if not value then
-            RestoreCollisions()
-        end
     end,
 })
 
 TabMove:CreateInput({
-    name = "Jugador para teleport",
+    name = "Jugador",
     placeholder = "Nombre exacto o parcial",
     value = "",
     flag = "targetPlayer",
@@ -1956,51 +1753,34 @@ TabMove:CreateInput({
 
 TabMove:CreateButton({
     name = "Teleport al jugador",
-    callback = TeleportToPlayer,
+    callback = Async("Teleport", ExecTeleportToPlayer),
 })
 
 -- VISUALES
 
 TabVisuals:CreateToggle({
     name = "ESP jugadores",
-    description = "Resalta a los otros jugadores.",
     flag = "playerESP",
     value = false,
     callback = function(value)
         State.ESP = value
-        RefreshAllESP()
-    end,
-})
-
-TabVisuals:CreateToggle({
-    name = "ESP enemigos",
-    description = "Resalta BadGuys, jefes y variantes.",
-    flag = "enemyESP",
-    value = false,
-    callback = function(value)
-        State.EnemyESP = value
-        RefreshEnemyESP()
+        RefreshESP()
     end,
 })
 
 TabVisuals:CreateToggle({
     name = "Fullbright",
-    description = "Local. Sube luz y quita sombras.",
     flag = "fullbright",
     value = false,
     callback = function(value)
         State.Fullbright = value
 
-        if value then
-            Lighting.Brightness = 3
-            Lighting.ClockTime = 14
-            Lighting.FogEnd = 100000
-            Lighting.FogStart = 0
-            Lighting.GlobalShadows = false
-            Lighting.Ambient = Color3.fromRGB(150, 150, 150)
-            Lighting.OutdoorAmbient = Color3.fromRGB(150, 150, 150)
-        else
-            RestoreLighting()
+        if not value then
+            for property, original in pairs(OriginalLighting) do
+                pcall(function()
+                    Lighting[property] = original
+                end)
+            end
         end
     end,
 })
@@ -2009,53 +1789,21 @@ TabVisuals:CreateToggle({
 
 TabLobby:CreateText({
     name = "Roles",
-    text = "Solo funcionan en el lobby (14775231477 / 13864661000), "
-        .. "antes de empezar la partida.",
+    text = "Solo en el lobby (14775231477 / 13864661000), antes de empezar.",
 })
 
 TabLobby:CreateButton({
-    name = "Solicitar Hacker",
-    callback = function()
-        if TryFire("RemoteEvents", "OutsideRole", "Phone", true, false) then
-            Notify("Lobby", "Rol Hacker solicitado.")
-        end
-    end,
+    name = "Rol Hacker",
+    callback = Async("Hacker", function()
+        return ExecLobbyRole("Hacker")
+    end),
 })
 
 TabLobby:CreateButton({
-    name = "Solicitar Nerd",
-    callback = function()
-        if TryFire("RemoteEvents", "OutsideRole", "Book", true, false) then
-            Notify("Lobby", "Rol Nerd solicitado.")
-        end
-    end,
-})
-
-TabLobby:CreateButton({
-    name = "Tocar objetos del lobby",
-    description = "firetouchinterest sobre las partes con TouchInterest.",
-    callback = function()
-        local root = GetRoot()
-
-        if not root then
-            return
-        end
-
-        local touched = 0
-
-        for _, object in ipairs(Workspace:GetChildren()) do
-            if object.Name == "Part" and object:FindFirstChild("TouchInterest") then
-                pcall(function()
-                    firetouchinterest(object, root, 0)
-                    task.wait()
-                    firetouchinterest(object, root, 1)
-                    touched += 1
-                end)
-            end
-        end
-
-        Notify("Lobby", tostring(touched) .. " partes tocadas.")
-    end,
+    name = "Rol Nerd",
+    callback = Async("Nerd", function()
+        return ExecLobbyRole("Nerd")
+    end),
 })
 
 -- DIAGNÓSTICO
@@ -2068,70 +1816,47 @@ local RemoteChecks = {
     {"Events", "RainbowWhatStat"},
     {"Events", "HitBadguy"},
     {"Events", "IceSlip"},
-    {"Events", "RoadMissionEvent"},
-    {"Events", "OutsideFood"},
-    {"Events", "LarryEndingEvent"},
-    {"Events", "OnDoorHit"},
-    {"Events", "CatFed"},
-    {"Events", "LouiseGive"},
-    {"Events", "KeyEvent"},
     {"RemoteEvents", "OutsideRole"},
 }
 
-local function RunDiagnostics()
-    local found = 0
-    local report = {}
-
-    print("========== VANTA DIAGNÓSTICO ==========")
-    print("PlaceId:", game.PlaceId)
-    local okInfo, info = pcall(function()
-        return game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId)
-    end)
-
-    print("Juego:", okInfo and info and info.Name or "desconocido")
-    print("Hooks:", HookAvailable and "sí" or "no")
-
-    for _, check in ipairs(RemoteChecks) do
-        local remote = FindRemote(check[1], check[2])
-        local label = check[1] .. "." .. check[2]
-
-        if remote then
-            found += 1
-            print("[OK] " .. label)
-            table.insert(report, "OK " .. label)
-        else
-            warn("[NO] " .. label)
-        end
-    end
-
-    print("Errores:", State.Errors)
-    print("Último error:", State.LastError)
-    print("Paquetes descartados por límite:", State.Stats.Dropped)
-    print("=======================================")
-
-    Notify(
-        "Diagnóstico",
-        tostring(found) .. "/" .. tostring(#RemoteChecks)
-            .. " remotos encontrados. Detalle en la consola."
-    )
-
-    return found
-end
-
 TabDiag:CreateText({
-    name = "Estado",
-    text = "Los remotos verificados son: GiveTool, Vending, Energy, HealTheNoobs, "
-        .. "RainbowWhatStat, HitBadguy, RoadMissionEvent, OutsideFood, "
-        .. "LarryEndingEvent, IceSlip, OnDoorHit.",
+    name = "Cómo leer esto",
+    text = "✔ = ocurrió y se verificó. ✖ = no ocurrió y por qué. "
+        .. "Los contadores son de acciones, no de paquetes.",
 })
 
 TabDiag:CreateButton({
-    name = "Escanear remotos",
-    callback = RunDiagnostics,
+    name = "Comprobar remotos",
+    callback = function()
+        local found = 0
+
+        print("========== VANTA REMOTOS ==========")
+        print("PlaceId:", game.PlaceId)
+
+        for _, check in ipairs(RemoteChecks) do
+            local remote = ResolveRemote(check[1], check[2])
+
+            if remote then
+                found += 1
+                print("[OK] " .. check[1] .. "." .. check[2])
+            else
+                warn("[FALTA] " .. check[1] .. "." .. check[2])
+            end
+        end
+
+        print("===================================")
+
+        Notify(
+            "Remotos",
+            found == #RemoteChecks
+                and "✔ los " .. found .. " están presentes"
+                or "✖ faltan " .. (#RemoteChecks - found) .. " de " .. #RemoteChecks
+        )
+    end,
 })
 
 TabDiag:CreateButton({
-    name = "Imprimir árbol de ReplicatedStorage",
+    name = "Volcar ReplicatedStorage",
     callback = function()
         local function dump(parent, depth)
             if depth > 3 then
@@ -2149,18 +1874,7 @@ TabDiag:CreateButton({
 
         print("===== ReplicatedStorage =====")
         dump(ReplicatedStorage, 0)
-
-        local events = GetEventsFolder()
-
-        if events then
-            print("===== " .. events.Name .. " =====")
-
-            for _, child in ipairs(events:GetChildren()) do
-                print("  " .. child.ClassName .. " : " .. child.Name)
-            end
-        end
-
-        Notify("Diagnóstico", "Árbol impreso en la consola (F9).")
+        Notify("Volcado", "✔ árbol impreso en la consola (F9)")
     end,
 })
 
@@ -2170,13 +1884,12 @@ TabDiag:CreateButton({
         local lines = {
             "PlaceId: " .. tostring(game.PlaceId),
             "Hooks: " .. (HookAvailable and "sí" or "no"),
-            "Errores: " .. tostring(State.Errors),
-            "Último error: " .. tostring(State.LastError),
-            "Objetos pedidos: " .. tostring(State.Stats.Items),
-            "Curas: " .. tostring(State.Stats.Heals),
-            "Entrenos: " .. tostring(State.Stats.Trains),
-            "Daño enviado: " .. tostring(State.Stats.Damage),
-            "Paquetes descartados: " .. tostring(State.Stats.Dropped),
+            "Ejecutadas: " .. State.Stats.Executed,
+            "Fallidas: " .. State.Stats.Failed,
+            "Reintentos: " .. State.Stats.Retries,
+            "Paquetes descartados: " .. State.Stats.Dropped,
+            "Errores: " .. State.Errors,
+            "Último error: " .. State.LastError,
         }
 
         print("===== VANTA ESTADO =====")
@@ -2185,13 +1898,21 @@ TabDiag:CreateButton({
             print(line)
         end
 
-        Notify("Estado", lines[3] .. " | " .. lines[2])
+        Notify(
+            "Estado",
+            string.format(
+                "✔ %d | ✖ %d | reintentos %d",
+                State.Stats.Executed,
+                State.Stats.Failed,
+                State.Stats.Retries
+            )
+        )
     end,
 })
 
 TabDiag:CreateButton({
-    name = "Detener y limpiar",
-    description = "Restaura movimiento, colisiones, luz y cierra la ventana.",
+    name = "Detener y restaurar",
+    description = "Devuelve movimiento, colisiones, luz y el hook original.",
     callback = function()
         if State.Stop then
             State.Stop()
@@ -2203,106 +1924,48 @@ TabDiag:CreateButton({
 -- LOOPS
 -- ============================================================
 
+-- Auto-curación: solo si estás herido, y verifica que la vida suba.
 task.spawn(function()
     while State.Running do
         if State.AutoHeal then
             local humanoid = GetHumanoid()
 
-            -- Curarse a tope es lo que rompe el juego: solo si falta vida.
             if humanoid and humanoid.Health > 0
                 and humanoid.Health < humanoid.MaxHealth then
 
-                Safe("AutoHeal", HealSelf, true)
+                Safe("AutoHeal", ExecHeal, State.HealAmount)
             end
         end
 
-        task.wait(math.max(State.HealInterval, 0.2))
+        task.wait(math.max(State.HealInterval, 0.5))
     end
 end)
 
+-- Auto-ataque: sin notificación por tick para no inundar la UI.
 task.spawn(function()
     while State.Running do
         if State.AutoAttack then
-            Safe("AutoAttack", AttackEnemies, true)
+            Safe("AutoAttack", ExecAttackAll, State.AttackDamage, State.AttackBurst, true)
         end
 
-        task.wait(math.max(State.AttackInterval, 0.1))
+        task.wait(math.max(State.AttackInterval, 0.2))
     end
 end)
 
-task.spawn(function()
-    while State.Running do
-        if State.EnemyESP then
-            Safe("EnemyESP", RefreshEnemyESP)
-        end
-
-        task.wait(1)
-    end
-end)
-
--- El mapa regenera Hails/WavePart: se reaplica el bloqueo mientras esté activo.
-task.spawn(function()
-    while State.Running do
-        if State.NoWind then
-            Safe("NoWind", RemoveWind)
-        end
-
-        if State.NoMud then
-            Safe("NoMud", RemoveMud)
-        end
-
-        task.wait(1)
-    end
-end)
-
--- Congelar NPC: reancla cada tick corto mientras esté activo.
-task.spawn(function()
-    while State.Running do
-        if State.FreezeEnemies then
-            for _, npc in ipairs(GetEnemies()) do
-                local npcRoot = npc:IsA("Model")
-                    and npc:FindFirstChild("HumanoidRootPart")
-
-                if npcRoot and not npcRoot.Anchored then
-                    pcall(function()
-                        npcRoot.Anchored = true
-                    end)
-                end
-            end
-        end
-
-        task.wait(0.3)
-    end
-end)
-
--- Reaplica el estado del personaje cuando respawnea.
+-- Al respawnear se recapturan los valores originales y se reaplica lo activo.
 Connect(Player.CharacterAdded, function(character)
     task.wait(0.5)
 
     local humanoid = character:FindFirstChildOfClass("Humanoid")
 
     if humanoid then
-        RememberHumanoid(humanoid)
-
-        if State.SpeedEnabled then
-            humanoid.WalkSpeed = State.Speed
-        end
-
-        if State.JumpEnabled then
-            humanoid.UseJumpPower = true
-            humanoid.JumpPower = State.Jump
-        end
-
-        if State.Fullbright then
-            Lighting.Brightness = 3
-            Lighting.ClockTime = 14
-            Lighting.FogEnd = 100000
-            Lighting.GlobalShadows = false
-        end
+        State.HumanoidCache[humanoid] = nil
+        CaptureOriginals(humanoid)
+        ApplyLocalState()
     end
 
     if State.ESP then
-        RefreshAllESP()
+        RefreshESP()
     end
 end)
 
@@ -2315,28 +1978,45 @@ State.Stop = function()
         return
     end
 
+    State.Running = false
+
+    -- 1. Devolver propiedades locales al valor real del juego.
     local humanoid = GetHumanoid()
-    local original = humanoid and State.HumanoidCache[humanoid]
 
-    if humanoid and original then
-        if State.SpeedEnabled then
-            humanoid.WalkSpeed = original.WalkSpeed
-        end
+    if humanoid then
+        pcall(function()
+            humanoid.WalkSpeed = State.OriginalSpeed
+            humanoid.JumpPower = State.OriginalJump
+            humanoid.UseJumpPower = State.OriginalUseJumpPower
+        end)
+    end
 
-        if State.JumpEnabled then
-            humanoid.JumpPower = original.JumpPower
-            humanoid.UseJumpPower = original.UseJumpPower
+    for part, original in pairs(State.CollisionCache) do
+        if part and part.Parent then
+            pcall(function()
+                part.CanCollide = original
+            end)
         end
     end
 
-    State.Running = false
-    State.SemiGod = false
-    State.AntiSlip = false
-    State.AutoHeal = false
-    State.AutoAttack = false
-    State.ESP = false
-    State.EnemyESP = false
+    table.clear(State.CollisionCache)
 
+    for property, value in pairs(OriginalLighting) do
+        pcall(function()
+            Lighting[property] = value
+        end)
+    end
+
+    -- 2. Espacios y ESP.
+    for target in pairs(State.ESPObjects) do
+        RemoveESP(target)
+    end
+
+    pcall(function()
+        VisualFolder:Destroy()
+    end)
+
+    -- 3. Conexiones.
     for _, connection in ipairs(State.Connections) do
         pcall(function()
             connection:Disconnect()
@@ -2345,27 +2025,7 @@ State.Stop = function()
 
     table.clear(State.Connections)
 
-    RestoreCollisions()
-    RestoreLighting()
-    ClearEnemyESP()
-
-    -- Soltar cualquier NPC anclado por el modo congelar.
-    for _, npc in ipairs(GetEnemies()) do
-        local npcRoot = npc:IsA("Model")
-            and npc:FindFirstChild("HumanoidRootPart")
-
-        if npcRoot then
-            pcall(function()
-                npcRoot.Anchored = false
-            end)
-        end
-    end
-
-    pcall(function()
-        VisualFolder:Destroy()
-    end)
-
-    -- Restaurar el namecall original si enganchamos algo.
+    -- 4. Hook original de vuelta.
     if OriginalNamecall then
         pcall(function()
             hookmetamethod(game, "__namecall", OriginalNamecall)
@@ -2374,6 +2034,9 @@ State.Stop = function()
         OriginalNamecall = nil
     end
 
+    table.clear(State.RemoteCache)
+
+    -- 5. UI.
     pcall(function()
         Window:Unload()
     end)
@@ -2382,15 +2045,13 @@ State.Stop = function()
         Env.VANTA_BI2 = nil
     end
 
-    print("[VANTA] Funciones detenidas y entorno restaurado.")
+    print("[VANTA] detenido: movimiento, colisiones, luz y hook restaurados.")
 end
 
 Notify(
     "VANTA cargado",
     "PlaceId " .. tostring(game.PlaceId)
-        .. " | Hooks: " .. (HookAvailable and "sí" or "no")
+        .. " | hooks: " .. (HookAvailable and "sí" or "no")
 )
-
-Safe("Diagnóstico inicial", RunDiagnostics)
 
 return State

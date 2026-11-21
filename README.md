@@ -1,32 +1,31 @@
 # VANTA | BREAK IN 2
 
-Script con interfaz Rayfield Gen2 para Break In 2, reescrito sobre los remotos
-verificados de la historia y del lobby.
+Script con interfaz Rayfield Gen2 para Break In 2.
 
-## Carga rápida (recomendado)
+## La regla
+
+**Ninguna acción dice "solicitud enviada".** Cada botón hace cuatro cosas:
+
+1. **Dispara** el remoto.
+2. **Verifica** en el cliente que pasó de verdad — leyendo la mochila, la vida,
+   el stat, o el Humanoid del NPC.
+3. **Si no pasó**, reintenta por otra vía (otro remoto, otra forma de
+   argumentos, otro ítem).
+4. **Informa qué ocurrió**, con `✔` o `✖` y el motivo.
+
+Si el servidor lo rechaza, lo ves en la pantalla. No hay éxito falso.
+
+## Carga
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/main/loader.lua"))()
 ```
 
-El loader muestra la pantalla de carga, descarga `VANTA.lua`, lo ejecuta y se
-cierra. Si algo falla, deja el error en pantalla y en la consola en vez de
-desaparecer en silencio.
-
-## Carga directa
-
-```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/main/VANTA.lua"))()
-```
-
-## Probar una branch sin merge
+Para probar una branch sin merge:
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/<branch>/loader.lua"))()
 ```
-
-`main` solo sirve la versión mergeada. Para probar cambios sin merge, apunta a
-la branch.
 
 ## PlaceIds
 
@@ -36,106 +35,86 @@ la branch.
 | Lobby privado | `14775231477` |
 | Lobby | `13864661000` |
 
-El script no bloquea por PlaceId: en un lugar ajeno los remotos simplemente no
-existen y el diagnóstico lo dice.
+## Ejecutar, no pedir
 
-## Remotos usados
+La mitad de las funciones del script no mandan nada. Escriben la propiedad local
+cada frame desde `RunService.Stepped`, así que el servidor no puede rechazarlas:
 
-Todos viven en `ReplicatedStorage.Events` salvo donde se indique.
+- WalkSpeed, JumpPower, salto infinito
+- Noclip (con restauración real de colisiones al apagar)
+- Fullbright
+- ESP
+- Daño de último recurso (marcado como *local*, porque el servidor puede revertirlo)
 
-| Remoto | Firma | Uso |
-| --- | --- | --- |
-| `GiveTool` | `(nombre)` | Dar herramienta o comida |
-| `Vending` | `(3, item, categoria, jugador, 1)` | Armor (`Armor2`), armas (`Weapons`) |
-| `Energy` | `(delta, item)` | Cura (`+25`) o daño (`-n`) |
-| `HealTheNoobs` | `()` | Curar a todos los NPC |
-| `RainbowWhatStat` | `("Strength"\|"Speed")` | Entrenar |
-| `HitBadguy` | `(modelo, daño, 4)` | Daño a NPC — el modelo, no la parte |
-| `RoadMissionEvent` | `(1, TreeHitPart, 5)` | Romper árboles |
-| `OutsideFood` | `(6, {item2=, placement=})` | Caja de pizza / Bloxy Pack |
-| `LarryEndingEvent` | `(clave, true)` | Final secreto |
-| `IceSlip` | `(Vector3)` | Resbalón — lo bloquea el anti-slip |
-| `OnDoorHit` | `(parte)` | Golpear puerta |
-| `CatFed`, `LouiseGive`, `KeyEvent` | — | Verificados, sin botón dedicado |
-| `ReplicatedStorage.RemoteEvents.OutsideRole` | `(item, true, false)` | Roles Hacker / Nerd (solo lobby) |
+Lo que sí es remoto se verifica contra el estado del cliente.
 
-## Funciones
+## Cómo se verifica cada cosa
 
-**Inicio** — kit rápido (armor + curas + arma + entrenamiento), entrenar,
-matar NPC cercanos, curar a todos.
+| Acción | Se dispara | Se verifica con | Respaldo si falla |
+| --- | --- | --- | --- |
+| Dar objeto | `GiveTool(nombre)` | el ítem aparece en la mochila | `Vending(...)` para armas y armadura, luego el nombre con espacios |
+| Curar | `Energy(cantidad, ítem)` | la vida sube | escalera Pizza → Gold Pizza → Rainbow Pizza |
+| Curar a todos | `GiveTool("GoldenApple")` + `HealTheNoobs()` | manzana equipada; vida de aliados si el juego los expone | — |
+| Entrenar | `RainbowWhatStat(stat)` | el valor del stat sube | reintenta y, si no sube, lo dice |
+| Atacar | `HitBadguy(modelo, daño, 4)` | el Humanoid del NPC baja | parte raíz, 2 argumentos, y por último escritura local |
+| Rol de lobby | `OutsideRole(ítem, true, false)` | la herramienta del rol llega | variante de un solo argumento |
+| Teleport | escritura de `CFrame` | el personaje sigue en el destino | detecta anti-teleport y lo dice |
 
-**Supervivencia**
-- Semi godmode: convierte el daño negativo de `Energy` en 0
-- Anti-slip: corta `IceSlip` completo
-- Cura: manual o automática, con cantidad (10–150 HP) e intervalo
-- Entrenamiento: fuerza / velocidad / ambos, con repeticiones
+## Remotos
 
-**Objetos** — 29 ítems, acceso rápido a 10, y spawn de comida en la cocina por
-slot.
-
-**Combate** — radio, daño, golpes por NPC e intervalo configurables; ataque
-único, barrido completo, auto-ataque, congelar NPC, traer NPC, romper
-barricadas.
-
-**Mundo** — 13 teleports de la historia, quitar viento/granizo, quitar lodo,
-empujar NPC, final secreto, golpear puerta.
-
-**Movimiento** — WalkSpeed (16–300), JumpPower (50–300), salto infinito,
-noclip, teleport a jugador por nombre exacto o parcial.
-
-**Visuales** — ESP de jugadores, ESP de enemigos, fullbright.
-
-**Lobby** — solicitar Hacker, solicitar Nerd, tocar objetos con
-`TouchInterest`.
-
-**Diagnóstico** — escaneo de 15 remotos, volcado del árbol de
-`ReplicatedStorage`, estado del script, y parada limpia.
-
-## Lo que es local y lo que no
-
-| Local (no toca el servidor) | Remoto (el servidor decide) |
+| Remoto | Firma |
 | --- | --- |
-| WalkSpeed, JumpPower, salto infinito | Objetos, armas, armor |
-| Noclip, congelar NPC, empujar NPC | Cura, `HealTheNoobs` |
-| Fullbright, ESP | Entrenamiento, daño a NPC |
-| Quitar viento / lodo | Barricadas, comida, final secreto |
-
-`FireServer` no confirma nada. Un paquete enviado puede ser rechazado por el
-servidor sin aviso. Los contadores del script cuentan envíos, no resultados, y
-lo dicen así.
+| `Events.GiveTool` | `(nombre)` |
+| `Events.Vending` | `(3, ítem, categoría, jugador, 1)` |
+| `Events.Energy` | `(delta, ítem)` |
+| `Events.HealTheNoobs` | `()` |
+| `Events.RainbowWhatStat` | `("Strength" \| "Speed")` |
+| `Events.HitBadguy` | `(modelo, daño, 4)` |
+| `Events.IceSlip` | `(Vector3)` — lo corta el anti-slip |
+| `RemoteEvents.OutsideRole` | `(ítem, true, false)` |
 
 ## Seguridad de ejecución
 
-- **Limitador de paquetes**: 40 remotos por segundo. Lo que sobra se descarta y
-  se cuenta en `Paquetes descartados`. Evita el kick por spam.
-- **Auto-curación** solo actúa si la vida está por debajo del máximo, y no pide
-  pizza nueva si ya hay una en la mochila.
-- **`Safe`** envuelve todo con `xpcall` y guarda el traceback en
-  `Estado del script`.
-- **Parada limpia**: desconecta todo, restaura colisiones, luz, WalkSpeed,
-  JumpPower, desancla NPC y devuelve el `__namecall` original.
-- **Degradación**: si el executor no expone `hookmetamethod`, semi godmode y
-  anti-slip se apagan solos y la UI lo dice.
+- **Presupuesto de paquetes**: 60 remotos/s. Los reintentos de verificación no
+  pueden convertirse en flood. Lo descartado se cuenta y se muestra.
+- **Auto-curación** solo actúa si estás herido, y no pide ítem si ya lo tienes.
+- **`Safe`** envuelve todo con `xpcall` y guarda el traceback.
+- **Parada limpia**: devuelve WalkSpeed, JumpPower, colisiones, luz, destruye el
+  ESP y reinstala el `__namecall` original.
+- **Degradación**: sin `hookmetamethod`, semi godmode y anti-slip se apagan y la
+  UI lo dice.
+
+## Funciones
+
+- Semi godmode y anti-slip
+- Curación y auto-curación verificada
+- Curar a todos
+- Objetos y armas (28 ítems)
+- Entrenamiento de velocidad y fuerza con lectura de stat
+- Ataque a NPC / auto-ataque con escalera de argumentos
+- ESP de jugadores
+- WalkSpeed, JumpPower, salto infinito y noclip
+- Teleport a jugador
+- Fullbright
+- Roles de lobby
+- Diagnóstico de remotos y estado
+- Limpieza al cerrar
 
 ## Verificación
 
-`VANTA.lua` se ejecutó completo contra un árbol de Roblox simulado con los 15
-remotos reales: 77 elementos de UI registrados, los 77 callbacks disparados sin
-un solo error, y los argumentos de cada remoto comprobados contra la referencia
-del juego.
+Se ejecutó completo contra un árbol de Roblox simulado con dos servidores: uno
+que **acepta** cada remoto y uno que **rechaza** todos.
 
-## Parámetros rápidos
+- **Acepta**: 25 acciones `✔` verificadas, 0 crash.
+- **Rechaza**: 23 acciones `✖`, cada una con su motivo, 0 éxito falso, 0 crash.
 
-| Constante | Línea aprox. | Qué controla |
-| --- | --- | --- |
-| `RateLimit.Max` | ~230 | Remotos por segundo antes de descartar |
-| `Items` | ~280 | Lista del dropdown |
-| `PlaceCFrames` | ~1200 | Teleports |
-| `RemoteChecks` | ~2000 | Lista del diagnóstico |
+Sin el servidor real no se puede probar lo que el juego decide. Por eso el
+script no promete: comprueba, y cuando no puede comprobar lo dice.
 
 ## Notas
 
-- Los remotos pueden cambiar con una actualización del juego. El diagnóstico
-  marca cuáles faltan.
-- El final secreto y el rol de lobby dependen de que el servidor acepte; no hay
-  forma de confirmarlo desde el cliente.
+- Los remotos cambian con las actualizaciones. `Diagnóstico → Comprobar remotos`
+  marca los que faltan.
+- `HitBadguy` por escritura local daña en tu pantalla, no en la partida. Está
+  marcado como *local* precisamente para que no te confunda.
+- El rol de lobby depende del gamepass o de que estés en el lobby correcto.
