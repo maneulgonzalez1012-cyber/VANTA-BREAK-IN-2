@@ -28,11 +28,17 @@ local RunService = game:GetService("RunService")
 
 -- Script único generado por tools/build.py: lleva los 17 módulos dentro
 -- y los carga por separado. Un módulo roto no impide que carguen los demás.
-local SOURCE_URL =
-    "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/main/VANTA-BreakIn2.lua"
+--
+-- Dos direcciones: main es lo estable; si el PR todavía no está mergeado,
+-- el archivo no existe en main (404) y el segundo intento lo trae de la
+-- branch. Sin esto, el loader falla en la etapa 2 con un 404 aunque el
+-- script esté perfectamente publicado.
+local REPO = "https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2"
 
--- Para probar una branch sin merge, cambia la línea de arriba por:
--- .../VANTA-BREAK-IN-2/<branch>/VANTA-BreakIn2.lua
+local SOURCE_URLS = {
+    REPO .. "/main/VANTA-BreakIn2.lua",
+    REPO .. "/arena/51187ad8-vanta-break-in-2/VANTA-BreakIn2.lua",
+}
 
 local PALETTE = {
     background = Color3.fromRGB(12, 11, 10),
@@ -347,43 +353,62 @@ local function Worker()
     SetStage(1, "resolviendo el script")
     task.wait(0.15)
 
-    -- 2. Descargar (dos intentos: la red falla más de lo que parece)
+    -- 2. Descargar. Dos direcciones y dos pasadas por dirección:
+    -- la red falla más de lo que parece y el 404 de main es normal
+    -- mientras el PR no esté mergeado.
     SetStage(2, "0 KB")
 
     local source
+    local reasons = {}
 
-    for attempt = 1, 2 do
-        local ok, result = pcall(function()
-            return game:HttpGet(SOURCE_URL)
-        end)
+    for index, url in ipairs(SOURCE_URLS) do
+        for attempt = 1, 2 do
+            local ok, result = pcall(function()
+                return game:HttpGet(url)
+            end)
 
-        if ok and type(result) == "string" and #result > 0 then
-            source = result
-            SetProgress(1)
-            Prog.detail = string.format("%d KB", math.floor(#source / 1024))
+            if ok and type(result) == "string" and #result > 0 then
+                source = result
+                SetProgress(1)
+                Prog.detail = string.format(
+                    "%d KB%s",
+                    math.floor(#source / 1024),
+                    index > 1 and " (branch)" or ""
+                )
+                break
+            end
+
+            local reason
+
+            if not ok then
+                reason = tostring(result)
+            elseif type(result) ~= "string" then
+                reason = "respuesta no es texto (" .. type(result) .. ")"
+            else
+                reason = "respuesta vacía"
+            end
+
+            if attempt == 1 then
+                Prog.detail = "reintentando: " .. reason
+                task.wait(0.5)
+            else
+                -- Se guarda el motivo real, no solo el nombre de la
+                -- dirección: "502" y "respuesta vacía" se arreglan distinto.
+                table.insert(reasons, string.format(
+                    "%s (%s)",
+                    index == 1 and "main" or "branch",
+                    reason
+                ))
+            end
+        end
+
+        if source then
             break
-        end
-
-        local reason
-
-        if not ok then
-            reason = tostring(result)
-        elseif type(result) ~= "string" then
-            reason = "respuesta no es texto (" .. type(result) .. ")"
-        else
-            reason = "respuesta vacía"
-        end
-
-        if attempt == 1 then
-            Prog.detail = "reintentando: " .. reason
-            task.wait(0.6)
-        else
-            Fail(2, "no se pudo descargar: " .. reason)
-            return
         end
     end
 
     if not source then
+        Fail(2, "no se pudo descargar: " .. table.concat(reasons, " | "))
         return
     end
 

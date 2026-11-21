@@ -51,9 +51,9 @@ else
 fi
 
 line
-echo "5. Loader (9 escenarios)"
+echo "5. Loader (10 escenarios)"
 line
-for mode in ok missing brokenmodule notmodules neterr empty syntax runerr nostate; do
+for mode in ok pr404 missing brokenmodule notmodules neterr empty syntax runerr nostate; do
     printf '   %-14s ' "$mode"
     out=$(python3 /tmp/lt_clean.py "$mode" 2>&1)
     if echo "$out" | grep -q 'resultado: TERMINADO'; then

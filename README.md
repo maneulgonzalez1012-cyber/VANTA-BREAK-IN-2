@@ -26,7 +26,11 @@ empieza por ahí.
 loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/main/loader.lua"))()
 ```
 
-Para probar una branch sin merge:
+El loader **descarga el script de dos direcciones**: primero `main` (estable);
+si ese archivo todavía no existe ahí porque el PR no está mergeado, cae a la
+branch. Así funciona antes y después del merge sin tocar nada.
+
+Para probar una branch sin merge también puedes pedir el loader de la branch:
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/<branch>/loader.lua"))()
@@ -54,8 +58,8 @@ Cómo se ve cada final:
 | Todo bien | ✔ ✔ ✔ ✔ ✔ | `9/9 módulos \| 7/7 remotos` |
 | Remotos incompletos | ✔ ✔ ✔ ✔ **!** ámbar | `faltan X, Y (PlaceId ...)` |
 | Módulo roto | ✔ ✔ ✔ ✔ **!** ámbar | `1 módulo roto (PlaceId ...)` |
-| Red caída | ✔ **✖** · · · | `no se pudo descargar: HttpError 502` |
-| Respuesta vacía | ✔ **✖** · · · | `no se pudo descargar: respuesta vacía` |
+| Red caída | ✔ **✖** · · · | `no se pudo descargar: main (HttpError 502) \| branch (HttpError 502)` |
+| Respuesta vacía | ✔ **✖** · · · | `no se pudo descargar: main (respuesta vacía) \| branch (respuesta vacía)` |
 | Error de sintaxis | ✔ ✔ **✖** · · | `error de sintaxis: syntax error near '='` |
 | Script falla al correr | ✔ ✔ ✔ **✖** · | `el script falló: ...` |
 | Script corre pero no deja estado | ✔ ✔ ✔ ✔ **✖** | `corrió pero no dejó estado` |

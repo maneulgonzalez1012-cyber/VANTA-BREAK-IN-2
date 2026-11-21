@@ -104,7 +104,21 @@ SVC = { Players = Players, ReplicatedStorage = RS, TweenService = TweenService, 
 
 game = { PlaceId = 13864667823 }
 function game.GetService(_, n) return SVC[n] end
-function game.HttpGet(url)
+URLS_PEDIDAS = {}
+-- El loader llama game:HttpGet(url), con dos puntos: el primer argumento
+-- es `game`. Un mock con punto recibía la tabla como URL y todo pasaba
+-- por accidente.
+function game.HttpGet(_, url)
+    table.insert(URLS_PEDIDAS, url)
+
+    -- Caso real mientras el PR no está mergeado: main 404, branch 200.
+    if MODE == "pr404" then
+        if url:find("/main/") then
+            error("HttpError: 404 Not Found (raw.githubusercontent.com)")
+        end
+        return string.rep("-- fuente falsa con la branch\n", 120)
+    end
+
     if MODE == "neterr" then error("HttpError: 502 Bad Gateway") end
     if MODE == "empty" then return "" end
     if MODE == "syntax" then return "local x = = 1" end
