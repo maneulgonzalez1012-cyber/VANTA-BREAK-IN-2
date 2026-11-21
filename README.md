@@ -95,6 +95,13 @@ sm/
 vanta/                   el proyecto anterior (Break In 2), intacto
 ```
 
+## La URL responde
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  https://raw.githubusercontent.com/maneulgonzalez1012-cyber/VANTA-BREAK-IN-2/arena/51187ad8-vanta-break-in-2/StrongmanSimulator.lua
+```
+
 ## Si algo falla
 
 El loader nunca se queda mudo: si una etapa falla, se marca en rojo, se
