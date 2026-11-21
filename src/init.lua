@@ -1,84 +1,58 @@
 --[[
-    VANTA | NÚCLEO
-    Punto de entrada único. Carga cada módulo por separado.
+    VANTA | BREAK IN 2
+    Punto de entrada. Un archivo, ocho módulos.
 
-    Reglas de convivencia
-    1. Un módulo que falla al cargar no detiene a los demás.
-    2. Ningún módulo conoce a otro: se hablan por el Bus.
-    3. Cada módulo tiene su tab, sus conexiones y su estado.
-    4. Descargar un módulo solo limpia lo suyo.
+    Arranque inmediato
+    La ventana se monta en cuanto el menú responde. Las secciones se
+    suscriben después, cada una en su propio hilo, así ninguna puede
+    retrasar a las demás ni tumbarlas.
 
-    Orden de arranque
-    Bus -> Remotos -> Registro -> UI -> módulos -> menú
+    Convivencia
+    1. Cada sección tiene su tab. Tocar una no repinta otra.
+    2. Cada bandera vive en state.lua con el prefijo de su sección.
+    3. Una sección que falla al cargar queda marcada; las otras siguen.
+    4. Cerrar restaura TODO: velocidad, colisiones, luz y ventana.
 ]]
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Players = game:GetService("Players")
+local Sections = require("sections")
+local State = require("state")
+local Remotes = require("remotes")
+local Kit = require("kit")
 
-local Env = getgenv()
+-- ─── Secciones ─────────────────────────────────────────────
 
--- ─── Evitar doble instancia ────────────────────────────────
+local survival = require("survival")
+local trainer = require("trainer")
+local items = require("items")
+local combat = require("combat")
+local navigation = require("navigation")
+local movement = require("movement")
+local visuals = require("visuals")
+local lobby = require("lobby")
 
-if Env.VANTA_BI2 and type(Env.VANTA_BI2.Stop) == "function" then
-    pcall(Env.VANTA_BI2.Stop)
-end
+Sections.Declare("survival", survival)
+Sections.Declare("trainer", trainer)
+Sections.Declare("items", items)
+Sections.Declare("combat", combat)
+Sections.Declare("navigation", navigation)
+Sections.Declare("movement", movement)
+Sections.Declare("visuals", visuals)
+Sections.Declare("lobby", lobby)
 
--- ─── Núcleo ────────────────────────────────────────────────
-
-local Bus = require("core.bus")
-local Remotes = require("core.remotes")
-local Registry = require("core.registry")
-local PlayerLib = require("core.player")
-local Kit = require("ui.kit")
-
--- ─── Módulos ───────────────────────────────────────────────
-
-local moduleOrder = {
-    "survival",
-    "trainer",
-    "items",
-    "combat",
-    "navigation",
-    "movement",
-    "visuals",
-    "lobby",
-    "diagnostics",
-}
-
-local loaded = {}
-
-for _, moduleName in ipairs(moduleOrder) do
-    -- Cada módulo se pide por nombre. Si uno no compila o no existe,
-    -- el error queda anotado con SU nombre y el bucle sigue.
-    local ok, module = pcall(require, "features." .. moduleName)
-
-    if ok and type(module) == "table" and module.spec then
-        local declared, reason = Registry.Declare(module.spec)
-
-        if declared then
-            loaded[moduleName] = module
-        else
-            Bus.Record(moduleName, "no se pudo declarar: " .. tostring(reason))
-        end
-    else
-        Bus.Record(moduleName, "no se pudo cargar: " .. tostring(module))
-    end
-end
-
--- ─── UI ────────────────────────────────────────────────────
+-- ─── Menú ──────────────────────────────────────────────────
 
 local okLibrary, Rayfield = pcall(function()
     return loadstring(game:HttpGet("https://sirius.menu/gen2"))()
 end)
 
 if not okLibrary or not Rayfield then
-    warn("[VANTA] no se pudo cargar Rayfield Gen2: " .. tostring(Rayfield))
+    warn("[VANTA] no se pudo cargar el menú: " .. tostring(Rayfield))
     return nil
 end
 
 local window, windowError = Kit.Mount(Rayfield, {
     name = "VANTA | BREAK IN 2",
-    subtitle = "módulos aislados",
+    subtitle = "un módulo por zona",
     sidebarLayout = true,
     configuration = {
         autoSave = true,
@@ -92,314 +66,394 @@ if not window then
     return nil
 end
 
--- ─── Carga de módulos ──────────────────────────────────────
+-- ─── Carga de secciones ────────────────────────────────────
+-- Cada una en su hilo: una lenta no frena a las demás.
 
-local context = {
-    bus = Bus,
-    registry = Registry,
-    players = PlayerLib,
-    remotes = Remotes,
-}
-
-local status = {
-    running = true,
-    start = os.clock(),
-}
-
--- Cada módulo arranca en su propio hilo y con su propio pcall:
--- uno lento no bloquea al resto, uno roto no tumba a nadie.
-for _, record in ipairs(Registry.All()) do
-    local module = loaded[record.id]
-
-    if module then
-        task.spawn(function()
-            local ok, err = Registry.Load(record.id, Bus)
-
-            if not ok then
-                Kit.Notify(
-                    "Módulo roto",
-                    string.format("%s: %s", record.id, tostring(err))
-                )
-            end
-        end)
-    end
+for _, record in ipairs(Sections.List()) do
+    task.spawn(function()
+        Sections.Load(record.name)
+    end)
 end
 
--- ─── Menú ──────────────────────────────────────────────────
--- Cada módulo escribe solo en su tab. Dos módulos no comparten tab
--- salvo que lo declaren, y en ese caso van en secciones separadas.
+-- ─── Supervivencia ─────────────────────────────────────────
 
-local tabsUsed = {}
+local tab = Kit.Tab("Supervivencia")
 
-for _, record in ipairs(Registry.All()) do
-    local tab = Kit.Tab(record.tab)
+if tab then
+    Kit.Action(tab, "Curarme ahora", "Comprueba que la vida suba", function()
+        return survival.Heal()
+    end)
 
-    if tab then
-        tabsUsed[record.tab] = (tabsUsed[record.tab] or 0) + 1
+    Kit.Flag(tab, "Curarme solo", "Cura cuando bajas del umbral", "autoHeal",
+        survival.SetAutoHeal)
 
-        -- Si el tab ya lo usa otro módulo, se separa con su propia sección.
-        if record.id ~= "items" and record.id ~= "combat" then
-            Kit.Section(tab, {name = record.name})
-        end
+    Kit.Action(tab, "Curar a todos", "Manzana equipada + HealTheNoobs", function()
+        return survival.HealEveryone()
+    end)
 
-        Kit.Text(tab, {
-            name = record.name,
-            text = record.description,
-        })
-    end
-end
+    Kit.Flag(tab, "Semi godmode", "El daño de Energy no te toca", "semiGod",
+        survival.SetSemiGod)
 
--- ─── Acciones por tab ──────────────────────────────────────
+    Kit.Flag(tab, "Anti-slip", "IceSlip deja de resbalarte", "antiSlip",
+        survival.SetAntiSlip)
 
--- Toggle con reporte: el módulo decide, la UI solo informa.
-local function actionToggle(tab, moduleId, actionKey, label, description, flag)
-    return Kit.Toggle(tab, {
-        name = label,
-        description = description,
-        flag = flag,
-        value = false,
+    Kit.Section(tab, {name = "Entrenamiento"})
 
-        callback = Bus.Safe(moduleId, function(value)
-            local executed, detail = Registry.Run(moduleId, actionKey, Bus, value)
+    Kit.Action(tab, "Entrenar fuerza", "RainbowWhatStat(Strength)", function()
+        return trainer.Train("Strength")
+    end)
 
-            Kit.Notify(label, tostring(detail or
-                ((executed == true) and "aplicado" or "no se pudo aplicar")))
-        end),
-    })
-end
+    Kit.Action(tab, "Entrenar velocidad", "RainbowWhatStat(Speed)", function()
+        return trainer.Train("Speed")
+    end)
 
-local function actionButton(tab, moduleId, actionKey, label, description, ...)
-    local preset = table.pack(...)
+    Kit.Slider(tab, {
+        name = "Envíos por clic",
+        range = {1, 50},
+        increment = 1,
+        value = 10,
+        flag = "trainerReps",
 
-    return Kit.Button(tab, {
-        name = label,
-        description = description,
-
-        callback = function()
-            task.spawn(function()
-                -- Las acciones responden (ejecutado, motivo, ...).
-                local executed, detail = Registry.Run(moduleId, actionKey, Bus,
-                    table.unpack(preset, 1, preset.n))
-
-                Kit.Report(label, executed == true, tostring(detail or "sin respuesta"))
-            end)
+        callback = function(value)
+            trainer.SetReps(value)
         end,
     })
 end
 
--- Supervivencia
-local survivalTab = Kit.Tab("Supervivencia")
+-- ─── Objetos ───────────────────────────────────────────────
 
-if survivalTab then
-    actionButton(survivalTab, "survival", "heal", "Curarme ahora", "Verifica que la vida suba")
+tab = Kit.Tab("Objetos")
 
-    actionToggle(survivalTab, "survival", "setSemiGod", "Semi godmode",
-        "El servidor no puede bajarte la vida", "semiGod")
+if tab then
+    local selected = "Golden Apple"
 
-    actionToggle(survivalTab, "survival", "setAntiSlip", "Anti-slip",
-        "Ignora IceSlip", "antiSlip")
-
-    actionButton(survivalTab, "survival", "healEveryone", "Curar a todos", "Manzana dorada + HealTheNoobs")
-
-    actionButton(survivalTab, "trainer", "train", "Entrenar fuerza", "Strength", "Strength", 5)
-    actionButton(survivalTab, "trainer", "train", "Entrenar velocidad", "Speed", "Speed", 5)
-end
-
--- Objetos
-local itemsTab = Kit.Tab("Objetos")
-
-if itemsTab then
-    local Items = require("lib.items")
-
-    Kit.Dropdown(itemsTab, {
+    Kit.Dropdown(tab, {
         name = "Objeto",
-        options = Items.all,
-        value = "Golden Apple",
-        flag = "item",
+        options = items.all,
+        value = selected,
+        flag = "itemElegido",
 
-        callback = Bus.Safe("items", function(value)
-            local record = Registry.Get("items")
-
-            if record then
-                record.state.selected = type(value) == "table" and value[1] or value
-            end
-        end),
+        callback = function(value)
+            selected = type(value) == "table" and value[1] or value
+        end,
     })
 
-    actionButton(itemsTab, "items", "selected", "Dar y equipar", "Verifica la mochila")
-    actionButton(itemsTab, "items", "quickKit", "Kit rápido", "Armor, curas, arma")
-    actionButton(itemsTab, "items", "giveAll", "Dar todos", "29 objetos, uno por uno")
+    Kit.Action(tab, "Dar y equipar", "Comprueba la mochila", function()
+        return items.Give(selected)
+    end)
+
+    Kit.Action(tab, "Kit rápido", "Armadura, curas y arma", function()
+        return items.GiveKit()
+    end)
+
+    Kit.Action(tab, "Dar todos", "Todo el catálogo, uno a uno", function()
+        return items.GiveAll()
+    end)
+
+    Kit.Action(tab, "Equipar el elegido", "Solo si ya lo tienes", function()
+        return items.Equip(selected)
+    end)
 end
 
--- Combate
-local combatTab = Kit.Tab("Combate")
+-- ─── Combate ───────────────────────────────────────────────
 
-if combatTab then
-    actionButton(combatTab, "combat", "hitAll", "Atacar NPC cercanos", "Verifica por Humanoid")
-    actionButton(combatTab, "combat", "hitOne", "Atacar el primero", "Un solo objetivo")
+tab = Kit.Tab("Combate")
 
-    actionToggle(combatTab, "combat", "setAuto", "Auto ataque",
-        "Golpea NPC dentro del radio", "autoAttack")
+if tab then
+    Kit.Action(tab, "Atacar NPC cercanos", "Comprueba la vida del Humanoid", function()
+        return combat.HitAll()
+    end)
+
+    Kit.Action(tab, "Atacar el más cercano", "Un solo objetivo", function()
+        return combat.HitNearest()
+    end)
+
+    Kit.Flag(tab, "Auto ataque", "Golpea cada 0.6 s", "autoAttack",
+        combat.SetAuto)
+
+    Kit.Slider(tab, {
+        name = "Daño por golpe",
+        range = {1, 200},
+        increment = 1,
+        value = 65,
+        suffix = " HP",
+        flag = "combatDamage",
+
+        callback = function(value)
+            combat.SetDamage(value)
+        end,
+    })
 end
 
--- Navegación
-local navTab = Kit.Tab("Navegación")
+-- ─── Movimiento ────────────────────────────────────────────
 
-if navTab then
-    local Places = require("lib.places")
+tab = Kit.Tab("Movimiento")
 
-    for _, place in ipairs(Places.list) do
-        actionButton(navTab, "navigation", "toPlace", place.name, "Teleport", place.name)
-    end
+if tab then
+    Kit.Flag(tab, "Velocidad", "Escrita cada frame, no se pide", "speedOn",
+        movement.SetSpeedOn)
 
-    Kit.Input(navTab, {
-        name = "Jugador",
-        placeholder = "Nombre exacto o parcial",
-        value = "",
-        flag = "targetPlayer",
+    Kit.Slider(tab, {
+        name = "Velocidad",
+        range = {16, 200},
+        increment = 1,
+        value = 32,
+        flag = "speedValue",
 
-        callback = Bus.Safe("navigation", function(value)
-            local record = Registry.Get("navigation")
-
-            if record then
-                record.state.target = tostring(value or "")
-            end
-        end),
+        callback = function(value)
+            movement.SetSpeed(value)
+        end,
     })
 
-    actionButton(navTab, "navigation", "toPlayer", "Teleport al jugador", "Verifica el destino")
+    Kit.Flag(tab, "Salto alto", "JumpPower alto", "jumpOn",
+        movement.SetJumpOn)
+
+    Kit.Slider(tab, {
+        name = "Salto",
+        range = {50, 300},
+        increment = 1,
+        value = 78,
+        flag = "jumpValue",
+
+        callback = function(value)
+            movement.SetJump(value)
+        end,
+    })
+
+    Kit.Flag(tab, "Salto infinito", "Se re-salta en el aire", "infJump",
+        movement.SetInfJump)
+
+    Kit.Flag(tab, "Noclip", "Restaura colisiones al apagar", "noclip",
+        movement.SetNoclip)
 end
 
--- Movimiento
-local moveTab = Kit.Tab("Movimiento")
+-- ─── Navegación ────────────────────────────────────────────
 
-if moveTab then
-    actionToggle(moveTab, "movement", "setSpeed", "Velocidad", "Local, cada frame", "speedOn")
-    actionToggle(moveTab, "movement", "setJump", "Salto alto", "Local, cada frame", "jumpOn")
-    actionToggle(moveTab, "movement", "setInfJump", "Salto infinito", "Se re-salta en el aire", "infJump")
-    actionToggle(moveTab, "movement", "setNoclip", "Noclip", "Sin colisión, restaura al apagar", "noclip")
-end
+tab = Kit.Tab("Navegación")
 
--- Visuales
-local visualTab = Kit.Tab("Visuales")
+if tab then
+    Kit.Section(tab, {name = "Historia"})
 
-if visualTab then
-    actionToggle(visualTab, "visuals", "setESP", "ESP jugadores", "Highlight por jugador", "esp")
-    actionToggle(visualTab, "visuals", "setFullbright", "Fullbright", "Restaura la luz al apagar", "fullbright")
-end
-
--- Lobby
-local lobbyTab = Kit.Tab("Lobby")
-
-if lobbyTab then
-    actionButton(lobbyTab, "lobby", "role", "Rol Hacker", "Solo en el lobby", "Hacker")
-    actionButton(lobbyTab, "lobby", "role", "Rol Nerd", "Solo en el lobby", "Nerd")
-end
-
--- Diagnóstico
-local diagTab = Kit.Tab("Diagnóstico")
-
-if diagTab then
-    local diagRecord = Registry.Get("diagnostics")
-
-    if diagRecord then
-        diagRecord.state.registry = Registry
-        diagRecord.state.bus = Bus
-    end
-
-    actionButton(diagTab, "diagnostics", "modules", "Estado de módulos", "Aislamiento y errores")
-    actionButton(diagTab, "diagnostics", "scan", "Comprobar remotos", "Los 7 del juego")
-    actionButton(diagTab, "diagnostics", "signatures", "Firmas aprendidas", "Lo que el servidor aceptó")
-    actionButton(diagTab, "diagnostics", "probe", "Sondear", "Prueba todo y reporta")
-    actionButton(diagTab, "diagnostics", "dump", "Volcar ReplicatedStorage", "Árbol completo")
-end
-
--- ─── Cierre global ─────────────────────────────────────────
-
-local function stop()
-    if not status.running then
-        return
-    end
-
-    status.running = false
-
-    -- Descargar en orden inverso: lo último en montarse es lo primero en irse.
-    local all = Registry.All()
-
-    for index = #all, 1, -1 do
-        local record = all[index]
-
-        pcall(function()
-            -- Registry.Unload llama el teardown del módulo (spec o estado)
-            -- y desconecta solo las conexiones de ese módulo.
-            Registry.Unload(record.id, Bus)
+    for _, place in ipairs(navigation.places) do
+        Kit.Action(tab, place.name, "Teleport", function()
+            return navigation.ToPlace(place.name)
         end)
     end
 
-    Bus.DisconnectAll()
+    Kit.Section(tab, {name = "Jugadores"})
 
-    pcall(function()
-        window:Unload()
+    local target = ""
+
+    Kit.Input(tab, {
+        name = "Nombre",
+        placeholder = "exacto o parcial",
+        value = "",
+        flag = "targetPlayer",
+
+        callback = function(value)
+            target = tostring(value or "")
+        end,
+    })
+
+    Kit.Action(tab, "Ir al jugador", "Comprueba el destino", function()
+        return navigation.ToPlayer(target)
+    end)
+end
+
+-- ─── Visuales ──────────────────────────────────────────────
+
+tab = Kit.Tab("Visuales")
+
+if tab then
+    Kit.Flag(tab, "ESP jugadores", "Highlight por jugador", "esp",
+        visuals.SetESP)
+
+    Kit.Flag(tab, "Fullbright", "Restaura la luz al apagar", "fullbright",
+        visuals.SetFullbright)
+end
+
+-- ─── Lobby ─────────────────────────────────────────────────
+
+tab = Kit.Tab("Lobby")
+
+if tab then
+    Kit.Text(tab, {
+        name = "Dónde estás",
+        text = "Estás en: " .. lobby.WhereAmI()
+            .. ". Los roles solo funcionan en el lobby.",
+    })
+
+    Kit.Action(tab, "Rol Hacker", "Entrega el Phone", function()
+        return lobby.SetRole("Hacker")
     end)
 
-    if Env.VANTA_BI2 == status then
-        Env.VANTA_BI2 = nil
-    end
-
-    print("[VANTA] detenido: módulos descargados, conexiones cerradas.")
+    Kit.Action(tab, "Rol Nerd", "Entrega el Book", function()
+        return lobby.SetRole("Nerd")
+    end)
 end
 
-status.Stop = stop
-status.Verify = function()
-    local health = Registry.Health()
-    local missing = {}
+-- ─── Diagnóstico ───────────────────────────────────────────
 
-    for _, name in ipairs({"GiveTool", "Vending", "Energy", "HealTheNoobs",
-                           "RainbowWhatStat", "HitBadguy", "IceSlip"}) do
-        if not Remotes.Exists("Events", name) then
-            table.insert(missing, name)
+tab = Kit.Tab("Diagnóstico")
+
+if tab then
+    Kit.Action(tab, "Estado de secciones", "Aislamiento y errores", function()
+        local health = Sections.Health()
+
+        print("===== VANTA SECCIONES =====")
+
+        for _, record in ipairs(Sections.List()) do
+            print(string.format(
+                "  %-12s %s",
+                record.name,
+                record.error and ("ROTA: " .. record.error) or "ok"
+            ))
         end
+
+        print(string.format(
+            "  %d/%d sanas | %d conexiones",
+            health.healthy,
+            health.total,
+            Sections.ConnectionCount()
+        ))
+
+        return health.broken == 0, string.format(
+            "%d/%d secciones sanas, %d conexiones",
+            health.healthy,
+            health.total,
+            Sections.ConnectionCount()
+        )
+    end)
+
+    Kit.Action(tab, "Comprobar remotos", "Los siete de la historia", function()
+        local inventory = Remotes.Inventory()
+        local found, missing = 0, {}
+
+        for _, name in ipairs({"GiveTool", "Vending", "Energy", "HealTheNoobs",
+                               "RainbowWhatStat", "HitBadguy", "IceSlip"}) do
+            if inventory[name] then
+                found += 1
+            else
+                table.insert(missing, name)
+            end
+        end
+
+        if #missing == 0 then
+            return true, string.format("%d/7 remotos encontrados", found)
+        end
+
+        return false, string.format(
+            "%d/7: faltan %s",
+            found,
+            table.concat(missing, ", ")
+        )
+    end)
+
+    Kit.Action(tab, "Volcar remotos", "Lista completa a la consola (F9)", function()
+        local inventory = Remotes.Inventory()
+        local count = 0
+
+        print("===== REMOTOS DISPONIBLES =====")
+
+        for name, where in pairs(inventory) do
+            print(string.format("  %-18s en %s", name, where))
+            count += 1
+        end
+
+        if count == 0 then
+            return false, "no se encontró ningún remoto (¿estás en Break In 2?)"
+        end
+
+        return true, string.format("%d remotos, mira la consola con F9", count)
+    end)
+
+    Kit.Action(tab, "Probar cura", "Dispara Energy y mide", function()
+        return survival.Heal()
+    end)
+
+    Kit.Action(tab, "Cerrar todo", "Restaura y descarga el script", function()
+        task.defer(function()
+            local state = getgenv and getgenv().VANTA_BI2
+
+            if state and type(state.Stop) == "function" then
+                state.Stop()
+            end
+        end)
+
+        return true, "cerrando"
+    end)
+end
+
+-- ─── Arranque ──────────────────────────────────────────────
+
+local started = os.clock()
+local alive = true
+
+-- ─── Cierre ────────────────────────────────────────────────
+
+local function stop()
+    if not alive then
+        return
     end
 
-    return {
-        ok = #missing == 0 and health.broken == 0,
-        running = status.running,
-        placeId = game.PlaceId,
-        expected = 7,
-        missing = missing,
-        hooks = Registry.Get("survival") and Registry.Get("survival").state.hooks or false,
-        modules = health,
-    }
+    alive = false
+
+    -- Restaurar ANTES de desconectar no sirve: si el bucle sigue vivo,
+    -- vuelve a aplicar velocidad o noclip en el mismo frame. Se desconecta
+    -- primero y se restaura después.
+    local closed = Sections.DisconnectAll()
+
+    pcall(movement.Restore)
+    pcall(visuals.Shutdown)
+    pcall(survival.SetSemiGod, false)
+    pcall(survival.SetAntiSlip, false)
+
+    State.Reset()
+    Kit.Unload()
+
+    if getgenv then
+        getgenv().VANTA_BI2 = nil
+    end
+
+    print(string.format(
+        "[VANTA] cerrado: %d conexiones cortadas, todo restaurado.",
+        closed
+    ))
 end
-status.modules = Registry
-status.bus = Bus
 
-Env.VANTA_BI2 = status
+getgenv().VANTA_BI2 = {
+    Stop = stop,
+    sections = Sections,
+    state = State,
+    remotes = Remotes,
 
--- ─── Diagnóstico al arrancar ───────────────────────────────
+    Verify = function()
+        local health = Sections.Health()
 
-task.delay(0.5, function()
-    local health = Registry.Health()
+        return {
+            ok = health.broken == 0,
+            total = health.total,
+            healthy = health.healthy,
+            broken = health.broken,
+            placeId = game.PlaceId,
+            ms = math.floor((os.clock() - started) * 1000),
+            remotes = Remotes.Inventory(),
+            connections = Sections.ConnectionCount(),
+        }
+    end,
+}
+
+-- Un solo aviso si algo no arrancó.
+task.delay(0.3, function()
+    local health = Sections.Health()
 
     if health.broken > 0 then
-        Kit.Notify(
-            "Módulos",
-            string.format(
-                "%d/%d sanos. Revisa Diagnóstico → Estado de módulos.",
-                health.healthy,
-                health.total
-            )
-        )
+        Kit.Notify("Secciones rotas", string.format(
+            "%d de %d no arrancaron. Mira Diagnóstico → Estado de secciones.",
+            health.broken,
+            health.total
+        ))
     end
 end)
 
-Kit.Notify(
-    "VANTA cargado",
-    string.format(
-        "%d módulos | PlaceId %s",
-        #Registry.All(),
-        tostring(game.PlaceId)
-    )
-)
-
-return status
+return getgenv().VANTA_BI2

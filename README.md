@@ -2,10 +2,12 @@
 
 Script con interfaz Rayfield Gen2 para Break In 2.
 
-**Arquitectura modular**: 9 módulos independientes, cada uno en su archivo,
-con su propio estado y sus propias conexiones. Un módulo roto no tumba a los
-demás y ninguno puede interferir con otro. Detalle en
+**Todo junto, en módulos**: un script único con ocho secciones. Cada una tiene
+su tab, sus banderas y sus conexiones, y **activar una zona no toca las otras**.
+Una sección rota no tumba a las demás. Detalle en
 [ARQUITECTURA.md](ARQUITECTURA.md).
+
+Solo Luau: el script, el empaquetado y el arranque.
 
 ## La regla
 
@@ -46,7 +48,7 @@ La barra **no es una animación**. Cada etapa se marca cuando ocurre de verdad:
 | `Descargar` | llegan los KB de `VANTA-BreakIn2.lua` (dos intentos de red) |
 | `Compilar` | `loadstring` devuelve una función |
 | `Ejecutar` | el script corre sin error, con 12 s de límite: si se queda montándose, no bloquea la barra |
-| `Verificar módulos` | el script confirma que sus 9 módulos cargaron y 7/7 remotos existen. Si no dejó estado, dice **qué falta**: `loadstring`, `HttpGet`, `ReplicatedStorage.Events`, `PlayerGui` |
+| `Verificar módulos` | el script confirma que sus 8 secciones cargaron y 7/7 remotos existen. Si no dejó estado, dice **qué falta**: `loadstring`, `HttpGet`, `ReplicatedStorage.Events`, `PlayerGui` |
 
 La verificación la hace el **propio script** a través de `State.Verify()`, no una
 copia de su lista. Una sola fuente de verdad.
@@ -55,7 +57,7 @@ Cómo se ve cada final:
 
 | Situación | Marcas | Qué queda en pantalla |
 | --- | --- | --- |
-| Todo bien | ✔ ✔ ✔ ✔ ✔ | `9/9 módulos \| 7/7 remotos` |
+| Todo bien | ✔ ✔ ✔ ✔ ✔ | `8/8 secciones \| 7 remotos` |
 | Remotos incompletos | ✔ ✔ ✔ ✔ **!** ámbar | `faltan X, Y (PlaceId ...)` |
 | Módulo roto | ✔ ✔ ✔ ✔ **!** ámbar | `1 módulo roto (PlaceId ...)` |
 | Script que se queda montándose | ✔ ✔ ✔ ✔ **✖** | `no arrancó: ... | el script terminó sin crear su estado (mira la consola con F9)` |
@@ -178,30 +180,26 @@ segunda carga cura con **un solo** remoto en vez de reintentar variantes.
   disparan y esperan. El lector de stat de VANTA es propio, y si el juego no lo
   expone, la acción se informa sin afirmar que subió.
 
-## Módulos
+## Secciones
 
-Nueve módulos, cada uno en su archivo. Ninguno llama a otro: se hablan por el
-Bus, y cada uno tiene su propio estado, sus conexiones y su error.
+Ocho módulos en un solo archivo. Ninguno llama a otro: comparten `state.lua`
+para las banderas y `remotes.lua` para hablar con el servidor.
 
-| Módulo | Tipo | Qué hace |
+| Sección | Qué hace | Tipo |
 | --- | --- | --- |
-| `survival` | remoto | Curar, curar a todos, semi godmode, anti-slip |
-| `trainer` | remoto | Fuerza y velocidad, leyendo el stat para verificar |
-| `items` | remoto | Dar y equipar, comprobando la mochila |
-| `combat` | remoto | Daño a NPC, comprobando el Humanoid |
-| `navigation` | local | Teleports de la historia y a jugadores |
-| `movement` | local | Velocidad, salto, noclip |
-| `visuals` | local | ESP y fullbright |
-| `lobby` | remoto | Roles Hacker y Nerd |
-| `diagnostics` | core | Estado real de módulos, remotos y firmas |
-
-Todo el detalle del aislamiento, el contrato de un módulo y cómo partirlo en
-repositorios está en [ARQUITECTURA.md](ARQUITECTURA.md).
+| Supervivencia | Curar, curar a todos, semi godmode, anti-slip, auto-curación | remoto |
+| Entrenamiento | Fuerza y velocidad, leyendo el stat para verificar | remoto |
+| Objetos | Dar y equipar, comprobando la mochila | remoto |
+| Combate | Daño a NPC, comprobando el Humanoid | remoto |
+| Movimiento | Velocidad, salto, noclip — se escribe, no se pide | local |
+| Visuales | ESP y fullbright, restaurando al apagar | local |
+| Navegación | Teleports de la historia y a jugadores | local |
+| Lobby | Roles Hacker y Nerd | remoto |
 
 ## Desarrollo
 
 ```bash
-python3 tools/build.py     # src/ (17 archivos) -> VANTA-BreakIn2.lua
+python3 tools/build.py     # src/ (13 módulos) -> VANTA-BreakIn2.lua
 ./tools/verify.sh          # sintaxis + aislamiento + script único + loader
 ```
 

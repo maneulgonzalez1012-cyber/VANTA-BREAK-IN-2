@@ -26,9 +26,9 @@ python3 tools/build.py || fail=1
 line
 echo "3. Aislamiento de módulos"
 line
-for scenario in ok reject conflict broken mutecombat; do
+for scenario in ok broken toggle restore teardown; do
     printf '   %-12s ' "$scenario"
-    if out=$(python3 tools/tests/modtest.py "$scenario" 2>&1); then
+    if out=$(python3 tools/tests/isolation.py "$scenario" 2>&1); then
         echo "$out" | grep -q 'AISLAMIENTO OK' \
             && echo "OK" \
             || { echo "FALLO"; fail=1; }
@@ -55,9 +55,9 @@ echo "5. Loader (12 escenarios)"
 line
 for mode in ok pr404 slow missing brokenmodule notmodules neterr empty syntax runerr nostate hang; do
     printf '   %-14s ' "$mode"
-    out=$(python3 /tmp/lt_clean.py "$mode" 2>&1)
+    out=$(python3 tools/tests/loadertest.py "$mode" 2>&1)
     if echo "$out" | grep -qE 'resultado: (TERMINADO|LOADER TERMINADO)'; then
-        echo "$out" | grep -oE '\[[0-9]+/[0-9]+ (módulos|remotos)[^]]*\]' | head -1
+        echo "$out" | grep -oE '\[[0-9]+/[0-9]+ (secciones|remotos)[^]]*\]' | head -1
         echo "$out" | grep -oE 'WARN \[VANTA Loader\] .*' | head -1 | sed 's/^WARN \[VANTA Loader\] //'
         echo
     else

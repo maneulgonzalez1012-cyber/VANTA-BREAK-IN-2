@@ -372,43 +372,55 @@ def main():
             failures.append("VANTA_BI2.Verify no existe")
         else:
             v = state["Verify"]()
-            print(f"  Verify -> ok={v['ok']} remotos_ok={v['expected']} "
-                  f"faltan={len(list(v['missing'].values()))} "
-                  f"módulos={v['modules']['total']} sanos={v['modules']['healthy']}")
-            if v["modules"]["total"] != 9:
-                failures.append(f"se declararon {v['modules']['total']} módulos, no 9")
-            if not v["running"]:
-                failures.append("Verify dice que no está corriendo")
+            print(f"  Verify -> ok={v['ok']} secciones={v['total']} "
+                  f"sanas={v['healthy']} rotas={v['broken']} "
+                  f"remotos={len(list(v['remotes'].values()))} "
+                  f"conexiones={v['connections']} ({v['ms']} ms)")
+            if v["total"] != 8:
+                failures.append(f"se declararon {v['total']} secciones, no 8")
+            if v["broken"] != 0:
+                failures.append(f"{v['broken']} secciones rotas al cargar")
 
-    # ── 3. Módulos cargados ──
-    health = state["modules"]["Health"]() if state else None
-    if health:
-        if health["broken"] != 0:
-            failures.append(f"{health['broken']} módulos rotos al cargar")
+    # ── 3. Secciones cargadas ──
+    sections = state["sections"]
+    health = sections["Health"]()
+    print(f"  secciones: {health['healthy']}/{health['total']} sanas, "
+          f"{sections['ConnectionCount']()} conexiones")
+
+    if health["broken"] != 0:
+        for record in list(sections["List"]().values()):
+            if record["error"]:
+                print(f"    ROTA {record['name']}: {record['error']}")
+        failures.append(f"{health['broken']} secciones rotas al cargar")
 
     # ── 4. Acción real a través del bundle ──
-    Bus = state["bus"]
-    reg = state["modules"]
-    heal = reg["Run"]("survival", "heal", Bus, 25)
-    heal = heal if isinstance(heal, tuple) else (heal,)
-    print(f"  heal -> {heal[0]} | {heal[1] if len(heal) > 1 else ''}")
+    survival = sections["Get"]("survival")
+    itemsModule = sections["Get"]("items")
 
-    if not heal[0]:
-        failures.append(f"heal falló en el bundle: {heal[1] if len(heal)>1 else ''}")
+    res = survival["Heal"]()
+    res = res if isinstance(res, tuple) else (res,)
+    print(f"  survival.Heal -> {res[0]} | {res[1] if len(res) > 1 else ''}")
+
+    if not res[0]:
+        failures.append(f"heal falló en el bundle: {res[1] if len(res)>1 else ''}")
     if Work.humanoid().Health <= 42:
         failures.append("la vida no subió en el bundle")
 
-    give = reg["Run"]("items", "give", Bus, "Golden Apple")
-    give = give if isinstance(give, tuple) else (give,)
-    print(f"  give -> {give[0]} | {give[1] if len(give) > 1 else ''}")
-    if not give[0]:
-        failures.append(f"give falló en el bundle: {give[1] if len(give)>1 else ''}")
+    res = itemsModule["Give"]("Golden Apple")
+    res = res if isinstance(res, tuple) else (res,)
+    print(f"  items.Give -> {res[0]} | {res[1] if len(res) > 1 else ''}")
 
-    # ── 5. Una acción inexistente no explota ──
-    bad = reg["Run"]("survival", "noExiste", Bus)
-    bad = bad if isinstance(bad, tuple) else (bad,)
-    if bad[0]:
-        failures.append("una acción inexistente devolvió éxito")
+    # El motivo debe ser texto, no una tabla: si lo fuera, la UI pondría
+    # "table: 0x..." delante del usuario.
+    if len(res) > 1 and lua.eval("type")(res[1]) != "string":
+        failures.append(f"el motivo de Give no es texto: {type(res[1]).__name__}")
+    if not res[0]:
+        failures.append(f"give falló en el bundle: {res[1] if len(res)>1 else ''}")
+
+    # ── 5. Una función inexistente no explota ──
+    missing = survival["noExiste"]
+    if missing is not None:
+        failures.append("una función inexistente no devolvió nil")
 
     # ── 6. Stop limpia todo ──
     Stepped = Work.Stepped()

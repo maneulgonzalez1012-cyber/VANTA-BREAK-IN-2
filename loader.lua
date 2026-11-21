@@ -555,72 +555,81 @@ local function Worker()
 
     -- Si el script no expone Verify (versión vieja), se cuenta a mano.
     if not report then
-        local events = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
         local expected = {"GiveTool", "Vending", "Energy", "HealTheNoobs",
                           "RainbowWhatStat", "HitBadguy", "IceSlip"}
         local missing = {}
 
+        local places = {
+            game:GetService("ReplicatedStorage"):FindFirstChild("Events"),
+            game:GetService("ReplicatedStorage"):FindFirstChild("RemoteEvents"),
+        }
+
         for _, name in ipairs(expected) do
-            if not (events and events:FindFirstChild(name)) then
+            local found = false
+
+            for _, container in ipairs(places) do
+                if container and container:FindFirstChild(name) then
+                    found = true
+                end
+            end
+
+            if not found then
                 table.insert(missing, name)
             end
         end
 
         report = {
             ok = #missing == 0,
-            expected = #expected,
+            total = 7,
             missing = missing,
-            hooks = false,
+            found = #expected - #missing,
+            remotes = nil,
         }
     end
 
-    local found = report.expected - #report.missing
-    local modules = report.modules
+    -- El formato nuevo cuenta secciones; el viejo contaba remotos.
+    -- Se aceptan los dos para no romper con una versión anterior.
+    local sections = report.total or 0
+    local healthy = report.healthy or sections
+    local remotes = 0
+
+    if report.remotes then
+        for _ in pairs(report.remotes) do
+            remotes += 1
+        end
+    else
+        remotes = report.found or 0
+    end
 
     SetProgress(1)
 
-    if modules then
-        Prog.detail = string.format(
-            "%d/%d módulos | %d/%d remotos",
-            modules.healthy or 0,
-            modules.total or 0,
-            found,
-            report.expected
-        )
+    if sections > 0 then
+        Prog.detail = string.format("%d/%d secciones | %d remotos", healthy, sections, remotes)
     else
-        Prog.detail = string.format(
-            "%d/%d remotos | hooks %s",
-            found,
-            report.expected,
-            report.hooks and "sí" or "no"
-        )
+        Prog.detail = string.format("%d/7 remotos", remotes)
     end
 
     Prog.finished = true
 
-    -- El script cargó. Pero si faltan remotos o algún módulo no arrancó,
+    -- El script cargó. Pero si una sección no arrancó o faltan remotos,
     -- no es un ✔ limpio: se marca la etapa en ámbar y se dice por qué.
     if not report.ok then
         local causes = {}
 
-        if #report.missing > 0 then
+        if report.missing and #report.missing > 0 then
             table.insert(causes, "faltan " .. table.concat(report.missing, ", "))
         end
 
-        if modules and (modules.broken or 0) > 0 then
+        if (report.broken or 0) > 0 then
             table.insert(causes, string.format(
                 "%d %s",
-                modules.broken,
-                modules.broken == 1 and "módulo roto" or "módulos rotos"
+                report.broken,
+                report.broken == 1 and "sección rota" or "secciones rotas"
             ))
         end
 
-        if modules and (modules.conflicts or 0) > 0 then
-            table.insert(causes, string.format(
-                "%d %s",
-                modules.conflicts,
-                modules.conflicts == 1 and "acción en conflicto" or "acciones en conflicto"
-            ))
+        if #causes == 0 then
+            table.insert(causes, "el script arrancó a medias")
         end
 
         Prog.partial = string.format(

@@ -165,8 +165,8 @@ function loadstring(s)
             for _ = 1, 5 do coroutine.yield() end
             ENV.VANTA_BI2 = {
                 Verify = function()
-                    return { ok = true, expected = #EXPECTED, missing = {},
-                             hooks = true, modules = {total = 9, healthy = 9, broken = 0, conflicts = 0} }
+                    return { ok = true, total = 8, healthy = 8, broken = 0,
+                             found = #EXPECTED, missing = {} }
                 end,
             }
         end
@@ -175,8 +175,7 @@ function loadstring(s)
         return function()
             ENV.VANTA_BI2 = {
                 Verify = function()
-                    return { ok = true, expected = #EXPECTED, missing = {},
-                             hooks = true, modules = nil }
+                    return { ok = true, found = #EXPECTED, missing = {} }
                 end,
             }
         end
@@ -191,15 +190,13 @@ function loadstring(s)
                 local broken = (MODE == "brokenmodule") and 1 or 0
                 return {
                     ok = (#missing == 0) and broken == 0,
-                    expected = #EXPECTED,
+                    total = 8,
+                    healthy = 8 - broken,
+                    broken = broken,
                     missing = missing,
-                    hooks = true,
-                    modules = {
-                        total = 9,
-                        healthy = 9 - broken,
-                        broken = broken,
-                        conflicts = 0,
-                    },
+                    found = #EXPECTED - #missing,
+                    placeId = 13864667823,
+                    connections = 7,
                 }
             end,
         }

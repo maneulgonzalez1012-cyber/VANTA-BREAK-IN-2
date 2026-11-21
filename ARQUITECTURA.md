@@ -1,217 +1,208 @@
-# VANTA — arquitectura modular
+# VANTA — un archivo, ocho módulos
 
-Un solo script ejecuta todos los módulos. Cada módulo está en su archivo,
-con su propio estado, sus propias conexiones y su propio error. **Ninguno
-toca a otro.**
+Un solo script. Los módulos van juntos, cada uno en su sección, y **activar
+una zona no toca las otras**.
 
 ```
-loader.lua                 baja y ejecuta el script único, muestra el trabajo real
-VANTA-BreakIn2.lua         generado: 17 módulos empaquetados por separado
 src/
-├── init.lua               arranque y menú: declara, carga, monta UI
-├── core/
-│   ├── bus.lua            aislamiento de errores y conexiones
-│   ├── remotes.lua        única puerta al servidor + presupuesto + firmas
-│   ├── registry.lua       declaración, carga, descarga y despacho de acciones
-│   └── player.lua         lecturas del mundo (vida, mochila, NPC, stats)
-├── lib/
-│   ├── items.lua          catálogo de objetos
-│   └── places.lua         coordenadas de la historia
-├── ui/kit.lua             envoltorio de Rayfield, a prueba de fallos
-└── features/
-    ├── survival.lua       curar, curar a todos, semi godmode, anti-slip
-    ├── trainer.lua        fuerza y velocidad con lectura de stat
-    ├── items.lua          dar, equipar y verificar en la mochila
-    ├── combat.lua         daño a NPC verificado por Humanoid
-    ├── navigation.lua     teleports de la historia y a jugadores
-    ├── movement.lua       velocidad, salto, noclip — todo local
-    ├── visuals.lua        ESP y fullbright — restaura al apagar
-    ├── lobby.lua          roles Hacker y Nerd
-    └── diagnostics.lua    estado real de todo
+├── init.lua        arranque y menú
+├── sections.lua    carga y aislamiento de las secciones
+├── state.lua       las banderas de todos, con prefijo
+├── remotes.lua     única puerta al servidor, con firmas verificadas
+├── kit.lua         envoltorio del menú, a prueba de fallos
+├── survival.lua    curar, curar a todos, semi god, anti-slip, auto-cura
+├── trainer.lua     fuerza y velocidad
+├── items.lua       dar y equipar objetos
+├── combat.lua      daño a NPC y auto-ataque
+├── movement.lua    velocidad, salto, noclip
+├── visuals.lua     ESP y fullbright
+├── navigation.lua  teleports
+└── lobby.lua       roles Hacker y Nerd
 ```
+
+Todo Luau. No hay otro lenguaje en el proyecto: ni en el script ni en el
+empaquetado. `tools/build.py` solo copia texto de un archivo a otro.
 
 ---
 
-## Las cinco reglas que hacen que no se pisen
+## Qué significa "solo esa zona se prende"
 
-### 1. Un módulo roto no tumba a los demás
+Cuatro cosas, cada una comprobada con un test:
 
-`registry.lua` carga cada módulo con `pcall` y en su propio hilo. Si uno
-explota al arrancar, queda marcado como roto, se registra su error y los
-otros ocho siguen funcionando.
+### 1. Cada zona tiene su tab
 
-Medido: con `combat` lanzando a propósito al cargar, **8/9 módulos sanos**.
+Ocho tabs, una por sección. Tocar un botón de Supervivencia no repinta
+Objetos ni Combate.
 
-### 2. Ningún módulo llama a otro
+### 2. Cada bandera lleva el nombre de su sección
 
-Se comunican por el Bus. Un módulo publica, otro escucha, y ninguno
-necesita que el otro exista.
+`state.lua` es una tabla sola, y las llaves van con prefijo:
 
-```lua
-bus.On("algo", "miModulo", function(dato) ... end)
-bus.Emit("algo", dato)
+```
+survival.autoHeal    survival.semiGod    survival.antiSlip
+combat.auto          movement.speed      movement.noclip
+visuals.esp          visuals.fullbright
 ```
 
-### 3. Cada módulo ve solo su propio estado
+Medido: al encender Supervivencia, **la única llave que cambia es
+`survival.autoHeal`**. Ninguna otra se mueve. Y al encender Combate, la
+bandera de Supervivencia sigue encendida.
 
-`Registry.Run` inyecta el estado del módulo como primer argumento de la
-acción. No hay estado global compartido, así que dos módulos no pueden
-escribir la misma variable sin que se note.
+### 3. Cada sección registra sus conexiones a su nombre
 
-### 4. Las conexiones se limpian por módulo
+Nada de `Heartbeat:Connect(...)` suelto. Todo pasa por
+`Sections.Connect("movement", RunService.Stepped, ...)`, así cerrar una
+sección o el script entero corta solo lo suyo.
 
-Toda señal se conecta por `bus.Connect(nombreDelModulo, ...)`. Descargar
-`movement` cierra **solo** las conexiones de `movement`; `visuals` sigue
-vivo.
+Medido: 7 conexiones registradas, 7 cortadas al cerrar, **0 quedan**.
 
-Medido: descargar `movement` cierra 1 conexión `Stepped`, deja la de
-`visuals` intacta, y `visuals` sigue cargado.
+### 4. Una sección rota no tumba a las demás
 
-### 5. Dos acciones con el mismo nombre no se pisan en silencio
+Cada `Setup()` corre dentro de un `pcall` en su propio hilo. Si una revienta,
+queda marcada como rota, se avisa en Diagnóstico, y las otras siete siguen
+funcionando.
 
-El registro es dueño de las claves de acción. Si un segundo módulo declara
-`heal`, se registra un **conflicto** y se reporta en Diagnóstico en lugar
-de sobrescribir la primera.
-
-Medido: un módulo intruso que declara `heal` produce
-`conflicto: heal lo declaran survival y thief`.
+Medido: con `combat` lanzando a propósito al cargar, **7/8 secciones sanas** y
+6 conexiones vivas (la de combate nunca llegó a crearse).
 
 ---
 
-## Contrato de un módulo
-
-Un módulo es un archivo que devuelve una tabla con `spec`. Nada más.
+## El contrato de un módulo
 
 ```lua
-return {
-    spec = {
-        id = "movement",
-        name = "Movimiento",
-        kind = "local",                 -- local | remote | core
-        tab = "Movimiento",
-        order = 50,
-        description = "texto que ve el usuario",
+local X = {}
 
-        actions = {
-            setSpeed = function(state, enabled)
-                state.speedEnabled = enabled and true or false
-                return true, "velocidad " .. (enabled and "activa" or "apagada")
-            end,
-        },
+local State = require("state")
+local Sections = require("sections")
 
-        setup = function(ctx)
-            -- ctx.id, ctx.state, ctx.bus, ctx.registry
-        end,
-    },
-}
+function X.Setup()
+    -- opcional. Corre una vez, dentro de pcall.
+    Sections.Connect("x", game:GetService("RunService").Heartbeat, function()
+        if not State.Get("x.algo") then return end
+        -- ...
+    end)
+end
+
+function X.HacerAlgo()
+    -- Toda acción devuelve (ejecutado, motivo).
+    -- `ejecutado` es true SOLO si el efecto se comprobó.
+    return true, "qué pasó exactamente"
+end
+
+return X
 ```
 
-Reglas del contrato:
+Reglas:
 
-- **Toda acción devuelve `(ejecutado, motivo)`.** `ejecutado` es `true` solo
-  si el efecto ocurrió de verdad y se comprobó.
-- **`state` es el único sitio donde el módulo guarda cosas.**
-- **No se llama `require` de otro módulo de features.** Si de verdad hace
-  falta comunicación, se usa el Bus.
-- **El teardown va en `state.teardown`** y `Registry.Unload` lo ejecuta.
+- **Nunca** `require` de otro módulo de los ocho. Si hacen falta datos
+  compartidos, van en `state.lua` o en `remotes.lua`.
+- **Todo** lo que se encienda se apaga: `Setup` guarda lo original y
+  `Restore`/`Shutdown` lo devuelve.
+- **Toda** acción devuelve `(ejecutado, motivo)`. Nada de "solicitud enviada".
+
+---
+
+## Remotos: lo que se verificó
+
+Se cruzaron cinco scripts públicos que funcionan para sacar la forma real de
+cada remoto. No hay adivinanzas:
+
+| Remoto | Argumentos | Qué hace |
+| --- | --- | --- |
+| `GiveTool` | `(nombre sin espacios)` | da un objeto |
+| `Vending` armadura | `(3, "Armor2", "Armor", nombre, 1)` | compra armadura |
+| `Vending` arma | `(3, "Crowbar2", "Weapons", nombre, 1)` | compra arma |
+| `Energy` | `(cantidad, "Pizza")` | cura. Con negativo, **daña** |
+| `HealTheNoobs` | `()` | cura al equipo, exige manzana en la mano |
+| `RainbowWhatStat` | `("Speed" \| "Strength")` | entrena |
+| `HitBadguy` | `(modelo, 64.8, 4)` | daña NPC |
+| `IceSlip` | `(Vector3)` | te resbala; se bloquea en el hook |
+| `OutsideRole` | `("Phone" \| "Book", true, false)` | rol del lobby |
+| `OutsideFood` | `(6, {item2=, placement=})` | objeto de tienda |
+| `RoadMissionEvent` | `(1, parte, 5)` | árbol de la misión |
+| `LarryEndingEvent` | `(llave, true)` | final |
+| `KeyEvent` | `()` | palanca |
+| `CurePlayer` | `(jugador, jugador)` | cura a alguien |
+| `CatFed` | `(nombre)` | alimentar al gato |
+| `LouiseGive` | `(2)` | Louise |
+
+**Dos carpetas**: el juego expone los mismos remotos en
+`ReplicatedStorage.Events` (historia) y en `ReplicatedStorage.RemoteEvents`
+(lobby). `remotes.lua` prueba las dos, porque un script que solo mira una
+falla en silencio en el otro lugar.
+
+Fuentes cruzadas: `NoobHubV1/Break In 2 Story.lua`, `RScriptz/BreakIn2.lua`,
+`Vcsk/BreakingBlitz.lua`, `carlwashere/BreakIn2.lua`,
+`Aviiela/CookieHub`.
 
 ---
 
 ## Cómo se comprueba que algo pasó
 
-Cada módulo mide su propio efecto. No hay "solicitud enviada".
-
 | Acción | Cómo sabe que funcionó |
 | --- | --- |
 | Curar | la vida del Humanoid subió |
-| Dar objeto | el `Tool` está en la mochila |
-| Curar a todos | la manzana está equipada y el remoto existe |
-| Atacar NPC | la vida del NPC bajó por el remoto |
-| Entrenar | el número del stat subió en la UI |
+| Curar a todos | la manzana está en la mano y el remoto existe |
+| Dar objeto | el `Tool` está en la mochila o en la mano |
+| Atacar NPC | la vida del NPC bajó (si solo bajó en tu pantalla, **se dice**) |
+| Entrenar | el número del stat subió en la interfaz |
 | Teleport | sigues en el destino 0.6 s después |
 | Rol | tienes la herramienta del rol |
-| Velocidad/salto/noclip | la propiedad escrita es la que pediste |
+| Velocidad / noclip | la propiedad escrita es la que pediste |
 | ESP | el Highlight existe y cuelga de tu carpeta |
 
-Y cuando solo funciona en el cliente, **se dice**:
+Cuando solo funciona en el cliente, lo dice sin adornos:
 
 ```
-✖ Atacar NPC cercanos: 1 dañados, 0 caídos, 1 solo en cliente
+✖ Atacar NPC cercanos: 1 dañados, 0 caídos, 1 solo en tu pantalla
+✖ Dar y equipar: Golden Apple no llegó a la mochila (el servidor lo rechazó)
 ```
-
-Medido con un servidor que ignora todos los remotos: `give` responde
-`Golden Apple no llegó por ninguna de 2 vías`, `heal` responde
-`Energy no movió la vida con ningún ítem ni firma`, y el combate que mata
-solo en pantalla responde `solo en cliente` en vez de dar éxito.
-
----
-
-## Las tres clases de módulo
-
-**`local`** — no manda ni un remoto: `movement`, `visuals`, `navigation`
-(escribe CFrame directamente). El servidor no puede rechazar lo que no le
-pediste.
-
-**`remote`** — habla con el servidor por `core/remotes.lua`, con
-presupuesto de 60 paquetes/s y firmas aprendidas: `survival`, `items`,
-`combat`, `trainer`, `lobby`.
-
-**`core`** — solo informa: `diagnostics`.
 
 ---
 
 ## El script único
 
-`tools/build.py` mete los 17 archivos en `VANTA-BreakIn2.lua`. **No los
-concatena**: cada uno va en su propia entrada de una tabla y se compila
-por separado al cargarse.
+`tools/build.py` junta los 13 módulos en `VANTA-BreakIn2.lua`. **No los
+concatena**: cada uno va en su propia entrada de `FILES` y se compila por
+separado con `loadstring`.
 
 ```lua
-FILES["core.bus"] = [==[ ...código... ]==]
-FILES["features.combat"] = [==[ ...código... ]==]
+FILES["survival"] = [==[ ...código... ]==]
+FILES["combat"]   = [==[ ...código... ]==]
 ```
 
-Ventajas frente a pegar los archivos uno detrás de otro:
+Por qué importa:
 
-- Un error de sintaxis en un módulo no impide que los otros se compilen.
+- Un error de sintaxis en un módulo no impide que arranquen los otros.
 - Un `return` en un módulo no termina el script.
-- Un nombre repetido entre archivos no choca: cada uno tiene su propio
-  ámbito.
-- Las dependencias circulares se detectan y se avisan en vez de colgar.
+- Dos módulos pueden usar el mismo nombre de variable local sin chocar.
+- Las dependencias circulares se detectan y se avisan.
 
-Sobrecarga del cargador: 2.3 KB sobre 81.7 KB de código.
+Sobrecarga del cargador: 2 KB sobre 70 KB de código.
 
 ```bash
-python3 tools/build.py     # regenerar
-./tools/verify.sh          # comprobar todo
+python3 tools/build.py    # regenerar VANTA-BreakIn2.lua
+./tools/verify.sh         # comprobar todo
 ```
 
 ---
 
-## Partirlo en repositorios
-
-El árbol está preparado para moverse tal cual. Cada carpeta es un módulo
-de código con una sola responsabilidad y sin dependencias hacia arriba:
+## Verificación
 
 ```
-vanta-core     core/ + lib/       bus, remotes, registry, player, catálogos
-vanta-ui       ui/kit.lua         envoltorio de Rayfield
-vanta-features features/*.lua     9 módulos independientes entre sí
-vanta-loader   loader.lua + tools/build.py
-vanta-dist     VANTA-BreakIn2.lua  artefacto publicado
+./tools/verify.sh  →  TODO OK
 ```
 
-Reglas que hacen que se puedan separar sin romper nada:
+| Control | Qué mide |
+| --- | --- |
+| Sintaxis | 13 módulos + el bundle compilan |
+| Aislamiento `ok` | 8/8 secciones sanas, 7 conexiones |
+| Aislamiento `broken` | con una rota, 7/8 sanas |
+| Aislamiento `toggle` | tocar una sección no cambia banderas ajenas |
+| Aislamiento `restore` | `WalkSpeed 64→16`, `CanCollide false→true` |
+| Aislamiento `teardown` | 7 cortadas, 0 quedan |
+| Bundle | 8 tabs, 31 botones, arranque completo, `Stop` limpio |
+| Loader | 12 escenarios con su mensaje correcto |
 
-- `features/*` solo depende de `core/` y `lib/`. Nunca de otro feature.
-- `core/` no conoce a `features/`.
-- `ui/` no conoce a `features/`.
-- El único archivo que los junta es `init.lua`.
-
-Para mover un feature a su propio repo basta con copiar su archivo: sus
-dos `require` son `core.player` y `core.remotes`.
-
-Si en algún momento quieres repos separados de verdad, el orden es:
-primero `vanta-core` (todos lo necesitan), después cada feature, y al
-final el `vanta-dist` que los empaqueta. **No puedo crear repositorios
-desde aquí** — este checkout solo puede escribir en su propia branch.
+Los tests están en `tools/tests/` y corren desde el repo, sin rutas
+absolutas ni dependencias fuera de Python y `lupa`.
