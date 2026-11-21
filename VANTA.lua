@@ -90,10 +90,15 @@ local State = {
         Dropped = 0,
     },
 
+    -- Lo que el script aprende del servidor real durante la sesión.
+    -- Vive en getgenv para que sobreviva a recargas sin re-aprender.
+    Learned = Env.VANTA_BI2_LEARNED or {},
+
     Errors = 0,
     LastError = "Ninguno",
-    Trace = {},
 }
+
+Env.VANTA_BI2_LEARNED = State.Learned
 
 Env.VANTA_BI2 = State
 
@@ -391,6 +396,69 @@ local function Evt(remoteName, ...)
 end
 
 -- ============================================================
+-- FIRMAS APRENDIDAS
+-- ============================================================
+-- El servidor decide. Cuando una variante de argumentos funciona, se anota
+-- con la clave de la acción. La siguiente sesión empieza por la que ganó.
+
+local function SignatureKey(action)
+    return "sig:" .. action
+end
+
+local function GetSignature(action)
+    return State.Learned[SignatureKey(action)]
+end
+
+local function SetSignature(action, shape)
+    local key = SignatureKey(action)
+
+    if State.Learned[key] ~= shape then
+        State.Learned[key] = shape
+        print("[VANTA] firma aprendida " .. action .. " -> " .. tostring(shape))
+    end
+end
+
+-- Ejecuta una lista de variantes y devuelve la primera que cumpla `verify`.
+-- Mide antes/después para no creerse la primera respuesta.
+local function TryVariants(action, variants, verify, timeout)
+    local learned = GetSignature(action)
+    local ordered = {}
+
+    if learned then
+        for _, variant in ipairs(variants) do
+            if variant.label == learned then
+                table.insert(ordered, variant)
+            end
+        end
+    end
+
+    for _, variant in ipairs(variants) do
+        if variant.label ~= learned then
+            table.insert(ordered, variant)
+        end
+    end
+
+    for index, variant in ipairs(ordered) do
+        local okFire, reason = variant.fire()
+
+        if not okFire and variant.fatal then
+            return false, reason
+        end
+
+        if Await(action, verify, timeout or 1.0) then
+            SetSignature(action, variant.label)
+            return true, variant.detail or variant.label, index
+        end
+
+        if index < #ordered then
+            State.Stats.Retries += 1
+        end
+    end
+
+    return false, nil
+end
+
+-- ============================================================
 -- DETECTORES
 -- ============================================================
 
@@ -446,22 +514,47 @@ local function ReadMaxHealth()
 end
 
 -- Busca un stat legible en el cliente. El juego lo expone de formas
--- distintas según la versión, así que se prueban todas.
-local function ReadStat(statName)
+-- distintas según la versión, así que se prueban todas y se memoriza
+-- la primera que funciona: recorrer el árbol entero en cada tick es caro.
+
+local StatSource = {}
+
+local function LookupStat(statName)
     local wanted = statName:lower()
 
-    -- 1. Valores numéricos colgados del jugador.
+    -- 1. La ruta que usan los scripts del juego para el HUD.
+    local playerGui = Player:FindFirstChildOfClass("PlayerGui")
+
+    if playerGui then
+        local note = playerGui:FindFirstChild("Assets")
+
+        if note then
+            for _, object in ipairs(note:GetDescendants()) do
+                if object:IsA("TextLabel") then
+                    local text = object.Text:lower()
+
+                    if text:find(wanted, 1, true) then
+                        local number = text:match("(%d+%.?%d*)")
+
+                        if number then
+                            return tonumber(number), object
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- 2. Valores numéricos colgados del jugador.
     for _, object in ipairs(Player:GetDescendants()) do
         if (object:IsA("NumberValue") or object:IsA("IntValue"))
             and object.Name:lower():find(wanted, 1, true)
         then
-            return object.Value, object:GetFullName()
+            return object.Value, object
         end
     end
 
-    -- 2. Texto del HUD: "Strength: 12" o "STR 12".
-    local playerGui = Player:FindFirstChildOfClass("PlayerGui")
-
+    -- 3. Cualquier texto del HUD que mencione el stat.
     if playerGui then
         for _, object in ipairs(playerGui:GetDescendants()) do
             if object:IsA("TextLabel") and object.Text ~= "" then
@@ -471,14 +564,51 @@ local function ReadStat(statName)
                     local number = text:match("(%d+%.?%d*)")
 
                     if number then
-                        return tonumber(number), object:GetFullName()
+                        return tonumber(number), object
                     end
                 end
             end
         end
     end
 
+    return nil, nil
+end
+
+local function ReadStat(statName)
+    local cached = StatSource[statName]
+
+    -- La fuente se comprueba antes de usarse: si el HUD se reconstruyó,
+    -- se vuelve a buscar una vez y se actualiza la memoria.
+    if cached and cached.Parent then
+        local value
+
+        if cached:IsA("TextLabel") then
+            local number = cached.Text:match("(%d+%.?%d*)")
+            value = number and tonumber(number)
+        else
+            value = cached.Value
+        end
+
+        if value then
+            return value, cached:GetFullName()
+        end
+    end
+
+    local value, source = LookupStat(statName)
+
+    if value and source then
+        StatSource[statName] = source
+        return value, source:GetFullName()
+    end
+
+    StatSource[statName] = nil
+
     return nil
+end
+
+-- Permitir que la sonda invalide la memoria si el juego cambió el HUD.
+local function ForgetStatSources()
+    table.clear(StatSource)
 end
 
 local EnemyFolders = {"BadGuys", "BadGuysBoss", "BadGuysFront"}
@@ -540,12 +670,6 @@ local function GetEnemyHumanoid(npc)
     return npc:FindFirstChildOfClass("Humanoid")
 end
 
-local function EnemyHealth(npc)
-    local humanoid = GetEnemyHumanoid(npc)
-
-    return humanoid and humanoid.Health or 0
-end
-
 local function IsEnemyAlive(npc)
     local humanoid = GetEnemyHumanoid(npc)
 
@@ -595,9 +719,12 @@ end
 -- Cada uno devuelve: ejecutado (bool), detalle (string).
 -- Ninguno devuelve "enviado". Devuelven lo que ocurrió.
 
+-- Nombre visible -> nombre de herramienta que espera el vending.
+-- "Crowbar 1" produce Crowbar1; el dorado es Crowbar3.
 local Weapons = {
     ["Crowbar 1"] = "Crowbar1",
     ["Crowbar 2"] = "Crowbar2",
+    ["Diamond Crowbar"] = "Crowbar3",
     ["Bat"] = "Bat",
     ["Pitchfork"] = "Pitchfork",
     ["Hammer"] = "Hammer",
@@ -629,6 +756,7 @@ local Items = {
     "Ladder",
     "Crowbar 1",
     "Crowbar 2",
+    "Diamond Crowbar",
     "Bat",
     "Pitchfork",
     "Hammer",
@@ -661,55 +789,66 @@ local function ExecGiveItem(item)
     end
 
     local name = ToolName(item)
-    local attempts = 0
+    local variants = {
+        {
+            label = "GiveTool(sin espacios)",
+            fire = function()
+                return Evt("GiveTool", name)
+            end,
+        },
+        {
+            label = "GiveTool(con espacios)",
+            fire = function()
+                return Evt("GiveTool", item)
+            end,
+        },
+    }
 
-    -- Vía principal.
-    attempts += 1
-    Evt("GiveTool", name)
-
-    if Await(item, function()
-        return FindToolIn(item) ~= nil
-    end, 1.2) then
-        return true, item .. " en la mochila (GiveTool)"
-    end
-
-    -- Vía de respaldo para armas y armadura.
-    State.Stats.Retries += 1
-    attempts += 1
-
+    -- El vending es la vía real de armas y armadura.
     if item == "Armor" then
-        Evt("Vending", 3, "Armor2", "Armor", Player.Name, 1)
+        table.insert(variants, 1, {
+            label = "Vending(Armor2)",
+            fire = function()
+                return Evt("Vending", 3, "Armor2", "Armor", Player.Name, 1)
+            end,
+        })
     elseif Weapons[item] then
-        Evt("Vending", 3, Weapons[item], "Weapons", Player.Name, 1)
+        table.insert(variants, 1, {
+            label = "Vending(" .. Weapons[item] .. ")",
+            fire = function()
+                return Evt("Vending", 3, Weapons[item], "Weapons", Player.Name, 1)
+            end,
+        })
     end
 
-    if Await(item, function()
+    local ok, label = TryVariants(item, variants, function()
         return FindToolIn(item) ~= nil
-    end, 1.5) then
-        return true, item .. " en la mochila (Vending)"
-    end
+    end, 1.0)
 
-    -- Última vía: el nombre con espacios por si el servidor no normaliza.
-    if name ~= item then
-        State.Stats.Retries += 1
-        attempts += 1
-        Evt("GiveTool", item)
+    if ok then
+        -- Equipar es parte de "dar el objeto", no un extra.
+        local tool = FindToolIn(item)
+        local character = GetCharacter()
 
-        if Await(item, function()
-            return FindToolIn(item) ~= nil
-        end, 1.0) then
-            return true, item .. " en la mochila (nombre con espacios)"
+        if tool and character and tool.Parent ~= character then
+            pcall(function()
+                tool.Parent = character
+            end)
         end
+
+        return true, string.format("%s en mochila (%s)", item, tostring(label))
     end
 
-    return false, item .. " no llegó tras " .. attempts .. " vías"
+    return false, item .. " no llegó por ninguna de " .. #variants .. " vías"
 end
 
 -- CURA -------------------------------------------------------
 -- La vida es la prueba. Si Energy no mueve la barra, se sube de ítem.
 
+-- El remoto Energy puede venir con firma (delta, ítem) o (delta, bool, bool)
+-- según la versión. Se prueban las dos y gana la que mueva la barra.
 local HealLadder = {
-    {item = "Pizza",  amount = 25},
+    {item = "Pizza", amount = 25},
     {item = "Gold Pizza", amount = 50},
     {item = "Rainbow Pizza", amount = 75},
 }
@@ -725,10 +864,10 @@ local function ExecHeal(amount)
     local maxHealth = ReadMaxHealth()
 
     if before >= maxHealth then
-        return true, "ya estaba a " .. tostring(math.floor(before)) .. " HP"
+        return true, "ya estaba a " .. math.floor(before) .. " HP"
     end
 
-    for index, step in ipairs(HealLadder) do
+    for _, step in ipairs(HealLadder) do
         local healFor = math.max(amount, step.amount)
 
         -- Solo pide el ítem si no lo tiene: pedirlo cada tick es lo que
@@ -740,26 +879,39 @@ local function ExecHeal(amount)
             end, 0.8)
         end
 
-        Evt("Energy", healFor, step.item)
+        local base = ReadHealth()
 
-        if Await("heal", function()
-            return ReadHealth() > before + 0.5
-        end, 1.2) then
+        local ok, label = TryVariants("heal", {
+            {
+                label = "Energy(delta, ítem)",
+                detail = step.item,
+                fire = function()
+                    return Evt("Energy", healFor, step.item)
+                end,
+            },
+            {
+                label = "Energy(delta, bool, bool)",
+                detail = step.item .. " (forma antigua)",
+                fire = function()
+                    return Evt("Energy", healFor, false, false)
+                end,
+            },
+        }, function()
+            return ReadHealth() > base + 0.5
+        end, 1.2)
+
+        if ok then
             return true, string.format(
                 "+%d HP con %s (%d → %d)",
                 math.floor(ReadHealth() - before),
-                step.item,
+                tostring(label),
                 math.floor(before),
                 math.floor(ReadHealth())
             )
         end
-
-        if index < #HealLadder then
-            State.Stats.Retries += 1
-        end
     end
 
-    return false, "Energy no movió la vida con ningún ítem"
+    return false, "Energy no movió la vida con ningún ítem ni firma"
 end
 
 -- CURAR A TODOS ----------------------------------------------
@@ -872,7 +1024,7 @@ end
 local function ExecTrain(stat, reps)
     reps = math.clamp(tonumber(reps) or 5, 1, 100)
 
-    local before, source = ReadStat(stat)
+    local before = ReadStat(stat)
     local done = 0
 
     for _ = 1, reps do
@@ -885,35 +1037,64 @@ local function ExecTrain(stat, reps)
         end
 
         done += 1
-
-        -- Sin stat legible no hay nada que verificar: se espacia para no
-        -- reventar el presupuesto y se sigue.
         task.wait(before and 0.25 or 0.2)
     end
 
-    if before then
-        local after = ReadStat(stat)
-
-        if after and after > before then
-            return true, string.format(
-                "%s %d → %d (+%d) en %d envíos",
-                stat,
-                math.floor(before),
-                math.floor(after),
-                math.floor(after - before),
-                done
-            )
-        end
-
-        return false, string.format(
-            "%s no subió (%d copias enviadas) — el servidor lo está ignorando",
+    if not before then
+        return true, string.format(
+            "%s: %d copias (sin stat legible para verificar)",
             stat,
             done
         )
     end
 
-    return true, string.format(
-        "%s: %d copias (sin stat legible para verificar)",
+    local after = ReadStat(stat)
+
+    if after and after > before then
+        return true, string.format(
+            "%s %d → %d (+%d) en %d envíos",
+            stat,
+            math.floor(before),
+            math.floor(after),
+            math.floor(after - before),
+            done
+        )
+    end
+
+    -- El nombre del stat puede ir en otro formato. Se prueban variantes
+    -- con la forma exacta que documenta el juego antes de rendirse.
+    local variants = {
+        {label = stat, arg = stat},
+        {label = stat:lower(), arg = stat:lower()},
+        {label = stat:upper(), arg = stat:upper()},
+    }
+
+
+    for _, variant in ipairs(variants) do
+        if variant.arg ~= stat then
+            State.Stats.Retries += 1
+            local base = ReadStat(stat)
+
+            Evt("RainbowWhatStat", variant.arg)
+            task.wait(0.4)
+
+            local now = ReadStat(stat)
+
+            if now and base and now > base then
+                SetSignature("train", variant.label)
+                return true, string.format(
+                    "%s subió con variante %s (%d → %d)",
+                    stat,
+                    variant.label,
+                    math.floor(base),
+                    math.floor(now)
+                )
+            end
+        end
+    end
+
+    return false, string.format(
+        "%s no subió (%d copias) — el servidor lo ignora o el stat no es legible",
         stat,
         done
     )
@@ -929,7 +1110,6 @@ local function ExecAttackOne(npc, damage, burst)
         return false, "sin vida", false
     end
 
-    local before = humanoid.Health
     local root = GetRoot()
 
     if root then
@@ -940,65 +1120,69 @@ local function ExecAttackOne(npc, damage, burst)
         end
     end
 
-    -- Forma 1: el modelo. Es la que documenta el juego.
-    for _ = 1, math.clamp(burst, 1, 10) do
-        Evt("HitBadguy", npc, damage, 4)
-    end
-
-    if Await("hit1", function()
-        return humanoid.Health < before
-    end, 0.5) then
-        return true, string.format("%d → %d", math.floor(before), math.floor(humanoid.Health))
-    end
-
-    -- Forma 2: la parte raíz. Algunas versiones la esperan.
-    State.Stats.Retries += 1
+    local before = humanoid.Health
     local part = GetEnemyRoot(npc)
+    local hits = math.clamp(burst, 1, 10)
 
-    if part then
-        for _ = 1, 2 do
-            Evt("HitBadguy", part, damage, 4)
-        end
+    local function volley(...)
+        local args = table.pack(...)
 
-        if Await("hit2", function()
-            return humanoid.Health < before
-        end, 0.6) then
-            return true, string.format(
-                "%d → %d (por parte)",
-                math.floor(before),
-                math.floor(humanoid.Health)
-            )
+        for _ = 1, hits do
+            Evt("HitBadguy", table.unpack(args, 1, args.n))
         end
     end
 
-    -- Forma 3: sin el tercer argumento.
-    State.Stats.Retries += 1
-    Evt("HitBadguy", npc, damage)
+    local variants = {
+        {
+            label = "HitBadguy(modelo, daño, 4)",
+            fire = function()
+                volley(npc, damage, 4)
+                return true
+            end,
+        },
+    }
 
-    if Await("hit3", function()
+    -- Algunas versiones quieren la parte raíz; otras ignoran el tercer arg.
+    if part then
+        table.insert(variants, {
+            label = "HitBadguy(parte, daño, 4)",
+            fire = function()
+                volley(part, damage, 4)
+                return true
+            end,
+        })
+    end
+
+    table.insert(variants, {
+        label = "HitBadguy(modelo, daño)",
+        fire = function()
+            volley(npc, damage)
+            return true
+        end,
+    })
+
+    local ok, label = TryVariants("hit", variants, function()
         return humanoid.Health < before
-    end, 0.6) then
+    end, 0.5)
+
+    if ok then
         return true, string.format(
-            "%d → %d (2 args)",
+            "%d → %d (%s)",
             math.floor(before),
-            math.floor(humanoid.Health)
-        )
+            math.floor(humanoid.Health),
+            tostring(label)
+        ), false
     end
 
     -- Última vía: si el Humanoid está replicado en el cliente, se escribe.
-    -- El servidor puede revertirlo. Se marca como local para que el
-    -- contador de caídos no te mienta.
+    -- Se marca como local para que el contador de caídos no te mienta.
     if humanoid.Health > 0 then
         pcall(function()
             humanoid.Health = 0
         end)
 
         if humanoid.Health < before then
-            return true, string.format(
-                "%d → %d (local)",
-                math.floor(before),
-                math.floor(humanoid.Health)
-            ), true
+            return true, string.format("%d → 0 (local)", math.floor(before)), true
         end
     end
 
@@ -1313,19 +1497,25 @@ local function ExecLobbyRole(roleName)
         return true, "ya tienes " .. roleName
     end
 
-    if not Emit("RemoteEvents", "OutsideRole", role.arg, true, false) then
-        -- Algunas versiones del lobby usan solo el ítem.
-        State.Stats.Retries += 1
-        Emit("RemoteEvents", "OutsideRole", role.arg)
-    end
-
-    -- La prueba del rol es la herramienta del gamepass.
-    local got = Await("role", function()
+    local ok, label = TryVariants("role", {
+        {
+            label = "OutsideRole(ítem, true, false)",
+            fire = function()
+                return Emit("RemoteEvents", "OutsideRole", role.arg, true, false)
+            end,
+        },
+        {
+            label = "OutsideRole(ítem)",
+            fire = function()
+                return Emit("RemoteEvents", "OutsideRole", role.arg)
+            end,
+        },
+    }, function()
         return FindToolIn(role.tool) ~= nil
-    end, 2.5)
+    end, 1.5)
 
-    if got then
-        return true, "rol " .. roleName .. " activo"
+    if ok then
+        return true, "rol " .. roleName .. " activo (" .. tostring(label) .. ")"
     end
 
     return false, "el lobby no entregó " .. roleName
@@ -1856,6 +2046,152 @@ TabDiag:CreateButton({
 })
 
 TabDiag:CreateButton({
+    name = "Sondear firmas (descubre la forma real)",
+    description = "Prueba cada variante de argumentos, mide el efecto y "
+        .. "guarda la que el servidor acepta.",
+    callback = function()
+        task.spawn(function()
+            Safe("Sonda", function()
+                local lines = {}
+                local function add(text)
+                    table.insert(lines, text)
+                    print("[SONDA] " .. text)
+                end
+
+                add("== SONDA ==")
+                add("PlaceId " .. tostring(game.PlaceId))
+
+                -- 1. Objetos: se prueba un objeto barato y se ve qué vía lo trae.
+                local probeItem = "Pizza"
+                local bagBefore = CountTools()
+                local gotItem = ExecGiveItem(probeItem)
+                local bagAfter = CountTools()
+
+                add(string.format(
+                    "objeto %s: %s (mochila %d → %d)",
+                    probeItem,
+                    gotItem and "aceptado" or "rechazado",
+                    bagBefore,
+                    bagAfter
+                ))
+
+                -- 2. Cura: se fuerza daño local antes, para tener margen real.
+                local humanoid = GetHumanoid()
+
+                if humanoid then
+                    local original = humanoid.Health
+                    local hurtTo = math.max(original - 40, 10)
+
+                    pcall(function()
+                        humanoid.Health = hurtTo
+                    end)
+
+                    local healed = ExecHeal(25)
+                    add("cura: " .. (healed and "aceptada" or "rechazada")
+                        .. string.format(" (vida %d → %d)", math.floor(hurtTo), math.floor(ReadHealth())))
+
+                    pcall(function()
+                        humanoid.Health = original
+                    end)
+                end
+
+                -- 3. Entrenamiento: una copia por variante de nombre.
+                ForgetStatSources()
+
+                for _, stat in ipairs({"Strength", "Speed"}) do
+                    local base = ReadStat(stat)
+
+                    if base then
+                        Evt("RainbowWhatStat", stat)
+                        task.wait(0.5)
+                        local now = ReadStat(stat)
+
+                        add(string.format(
+                            "entrenar %s: %s (%s → %s)",
+                            stat,
+                            (now and base and now > base) and "sube" or "no sube",
+                            tostring(base),
+                            tostring(now)
+                        ))
+                    else
+                        add("entrenar " .. stat .. ": sin lectura local")
+                    end
+                end
+
+                -- 4. Combate: una variante por forma sobre el primer NPC vivo.
+                local target = GetEnemies()[1]
+
+                if target then
+                    local npcHumanoid = GetEnemyHumanoid(target)
+
+                    if npcHumanoid then
+                        local startHealth = npcHumanoid.Health
+                        local ok, _, isLocal = ExecAttackOne(target, 5, 1)
+
+                        -- Si el único camino que funcionó fue escribir la vida
+                        -- en el cliente, no es el servidor aceptando: se dice.
+                        local verdict = "rechazado"
+
+                        if ok and not isLocal then
+                            verdict = "aceptado por el servidor"
+                        elseif ok and isLocal then
+                            verdict = "solo local (el servidor no lo aceptó)"
+                        end
+
+                        add(string.format(
+                            "golpe: %s (vida NPC %d → %d)",
+                            verdict,
+                            math.floor(startHealth),
+                            math.floor(npcHumanoid.Health)
+                        ))
+                    end
+                else
+                    add("golpe: no hay NPC en el mapa para probar")
+                end
+
+                -- 5. Foto de firmas aprendidas.
+                local learned = {}
+
+                for key, value in pairs(State.Learned) do
+                    table.insert(learned, key .. " = " .. tostring(value))
+                end
+
+                local readable = {}
+
+                for _, stat in ipairs({"Strength", "Speed"}) do
+                    if ReadStat(stat) then
+                        table.insert(readable, stat)
+                    end
+                end
+
+                add(string.format(
+                    "stats legibles: %s",
+                    #readable > 0 and table.concat(readable, ", ") or "ninguno"
+                ))
+
+                if #learned > 0 then
+                    table.sort(learned)
+                    add("firmas: " .. table.concat(learned, " ; "))
+                else
+                    add("firmas: ninguna todavía")
+                end
+
+                add("== FIN ==")
+
+                Notify(
+                    "Sonda",
+                    string.format(
+                        "%d líneas en consola | %d firmas aprendidas",
+                        #lines,
+                        #learned
+                    )
+                )
+            end)
+        end)
+    end,
+})
+
+TabDiag:CreateButton({
     name = "Volcar ReplicatedStorage",
     callback = function()
         local function dump(parent, depth)
@@ -1891,6 +2227,14 @@ TabDiag:CreateButton({
             "Errores: " .. State.Errors,
             "Último error: " .. State.LastError,
         }
+
+        local learnedCount = 0
+
+        for _ in pairs(State.Learned) do
+            learnedCount += 1
+        end
+
+        table.insert(lines, "Firmas aprendidas: " .. learnedCount)
 
         print("===== VANTA ESTADO =====")
 

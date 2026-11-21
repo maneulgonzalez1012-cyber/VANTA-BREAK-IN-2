@@ -4,16 +4,16 @@ Script con interfaz Rayfield Gen2 para Break In 2.
 
 ## La regla
 
-**Ninguna acción dice "solicitud enviada".** Cada botón hace cuatro cosas:
+**Ninguna acción dice "solicitud enviada".** Cada botón:
 
 1. **Dispara** el remoto.
-2. **Verifica** en el cliente que pasó de verdad — leyendo la mochila, la vida,
-   el stat, o el Humanoid del NPC.
-3. **Si no pasó**, reintenta por otra vía (otro remoto, otra forma de
-   argumentos, otro ítem).
+2. **Verifica** en el cliente que pasó de verdad — mochila, vida, stat o el
+   Humanoid del NPC.
+3. **Si no pasó**, intenta otra variante de argumentos u otro remoto.
 4. **Informa qué ocurrió**, con `✔` o `✖` y el motivo.
 
-Si el servidor lo rechaza, lo ves en la pantalla. No hay éxito falso.
+Y aprende: la variante que el servidor aceptó se guarda y la siguiente sesión
+empieza por ahí.
 
 ## Carga
 
@@ -37,35 +37,34 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/maneulgonzalez1012-cy
 
 ## Ejecutar, no pedir
 
-La mitad de las funciones del script no mandan nada. Escriben la propiedad local
-cada frame desde `RunService.Stepped`, así que el servidor no puede rechazarlas:
+Estas funciones no mandan remoto: se escriben en la propiedad cada frame desde
+`RunService.Stepped`. El servidor no puede rechazarlas.
 
 - WalkSpeed, JumpPower, salto infinito
-- Noclip (con restauración real de colisiones al apagar)
+- Noclip, con restauración real de colisiones al apagar
 - Fullbright
 - ESP
-- Daño de último recurso (marcado como *local*, porque el servidor puede revertirlo)
 
-Lo que sí es remoto se verifica contra el estado del cliente.
+## Variantes por acción
 
-## Cómo se verifica cada cosa
+El servidor decide qué firma acepta. Se prueban todas y gana la que produce un
+efecto medible.
 
-| Acción | Se dispara | Se verifica con | Respaldo si falla |
-| --- | --- | --- | --- |
-| Dar objeto | `GiveTool(nombre)` | el ítem aparece en la mochila | `Vending(...)` para armas y armadura, luego el nombre con espacios |
-| Curar | `Energy(cantidad, ítem)` | la vida sube | escalera Pizza → Gold Pizza → Rainbow Pizza |
-| Curar a todos | `GiveTool("GoldenApple")` + `HealTheNoobs()` | manzana equipada; vida de aliados si el juego los expone | — |
-| Entrenar | `RainbowWhatStat(stat)` | el valor del stat sube | reintenta y, si no sube, lo dice |
-| Atacar | `HitBadguy(modelo, daño, 4)` | el Humanoid del NPC baja | parte raíz, 2 argumentos, y por último escritura local |
-| Rol de lobby | `OutsideRole(ítem, true, false)` | la herramienta del rol llega | variante de un solo argumento |
-| Teleport | escritura de `CFrame` | el personaje sigue en el destino | detecta anti-teleport y lo dice |
+| Acción | Variantes (en orden) | Prueba |
+| --- | --- | --- |
+| Dar objeto | `GiveTool(sin espacios)` → `GiveTool(con espacios)`; armas y armadura empiezan por `Vending` | el ítem aparece en la mochila |
+| Curar | `Energy(delta, ítem)` → `Energy(delta, bool, bool)` × Pizza → Gold Pizza → Rainbow Pizza | la vida sube |
+| Entrenar | `"Strength"` → `"strength"` → `"STRENGTH"` | el stat sube |
+| Atacar | `HitBadguy(modelo, daño, 4)` → `(parte, daño, 4)` → `(modelo, daño)` | el Humanoid del NPC baja |
+| Rol de lobby | `OutsideRole(ítem, true, false)` → `OutsideRole(ítem)` | llega la herramienta del rol |
+| Teleport | escritura de `CFrame` ×3 | el personaje sigue en el destino |
 
 ## Remotos
 
 | Remoto | Firma |
 | --- | --- |
 | `Events.GiveTool` | `(nombre)` |
-| `Events.Vending` | `(3, ítem, categoría, jugador, 1)` |
+| `Events.Vending` | `(3, ítem, categoría, jugador, 1)` — `Armor2` para armadura, `Crowbar1/2/3` para palancas |
 | `Events.Energy` | `(delta, ítem)` |
 | `Events.HealTheNoobs` | `()` |
 | `Events.RainbowWhatStat` | `("Strength" \| "Speed")` |
@@ -73,14 +72,24 @@ Lo que sí es remoto se verifica contra el estado del cliente.
 | `Events.IceSlip` | `(Vector3)` — lo corta el anti-slip |
 | `RemoteEvents.OutsideRole` | `(ítem, true, false)` |
 
+## Diagnóstico
+
+- **Sondear firmas** — prueba cada variante, mide el efecto real y guarda la
+  ganadora. Deja el informe en la consola (F9). Es lo primero que hay que
+  pulsar en el juego.
+- **Comprobar remotos** — dice cuáles de los 8 existen en el lugar actual.
+- **Volcar ReplicatedStorage** — imprime el árbol por si el juego renombró algo.
+- **Estado del script** — acciones ejecutadas, fallidas, reintentos, paquetes
+  descartados, firmas aprendidas.
+
 ## Seguridad de ejecución
 
-- **Presupuesto de paquetes**: 60 remotos/s. Los reintentos de verificación no
-  pueden convertirse en flood. Lo descartado se cuenta y se muestra.
-- **Auto-curación** solo actúa si estás herido, y no pide ítem si ya lo tienes.
+- **Presupuesto de paquetes**: 60 remotos/s. Los reintentos no pueden convertirse
+  en flood. Lo descartado se cuenta.
+- **Auto-curación** solo actúa si estás herido y no pide ítem si ya lo tienes.
 - **`Safe`** envuelve todo con `xpcall` y guarda el traceback.
-- **Parada limpia**: devuelve WalkSpeed, JumpPower, colisiones, luz, destruye el
-  ESP y reinstala el `__namecall` original.
+- **Parada limpia**: devuelve movimiento, colisiones, luz, destruye el ESP y
+  reinstala el `__namecall` original.
 - **Degradación**: sin `hookmetamethod`, semi godmode y anti-slip se apagan y la
   UI lo dice.
 
@@ -89,32 +98,35 @@ Lo que sí es remoto se verifica contra el estado del cliente.
 - Semi godmode y anti-slip
 - Curación y auto-curación verificada
 - Curar a todos
-- Objetos y armas (28 ítems)
+- Objetos y armas (29 ítems, incluida Diamond Crowbar)
 - Entrenamiento de velocidad y fuerza con lectura de stat
-- Ataque a NPC / auto-ataque con escalera de argumentos
+- Ataque a NPC / auto-ataque con escalera de variantes
 - ESP de jugadores
 - WalkSpeed, JumpPower, salto infinito y noclip
 - Teleport a jugador
 - Fullbright
 - Roles de lobby
-- Diagnóstico de remotos y estado
+- Diagnóstico y sonda de firmas
 - Limpieza al cerrar
 
 ## Verificación
 
-Se ejecutó completo contra un árbol de Roblox simulado con dos servidores: uno
-que **acepta** cada remoto y uno que **rechaza** todos.
+Ejecutado completo contra un árbol de Roblox simulado con dos servidores:
 
-- **Acepta**: 25 acciones `✔` verificadas, 0 crash.
-- **Rechaza**: 23 acciones `✖`, cada una con su motivo, 0 éxito falso, 0 crash.
+| Servidor | Resultado |
+| --- | --- |
+| Acepta todo | 25 acciones `✔` verificadas, 30 firmas aprendidas, 0 crash |
+| Rechaza todo | 24 acciones `✖` con motivo, 0 éxito falso, 0 crash |
 
-Sin el servidor real no se puede probar lo que el juego decide. Por eso el
-script no promete: comprueba, y cuando no puede comprobar lo dice.
+Memoria entre sesiones comprobada: tras aprender `Energy(delta, ítem)`, la
+segunda carga cura con **un solo** remoto en vez de reintentar variantes.
 
 ## Notas
 
-- Los remotos cambian con las actualizaciones. `Diagnóstico → Comprobar remotos`
-  marca los que faltan.
-- `HitBadguy` por escritura local daña en tu pantalla, no en la partida. Está
-  marcado como *local* precisamente para que no te confunda.
-- El rol de lobby depende del gamepass o de que estés en el lobby correcto.
+- El daño de último recurso (`Humanoid.Health` desde el cliente) se marca como
+  **local**. Daña en tu pantalla, no en la partida, y el script lo dice así.
+- `HitBadguy` aceptado por el servidor baja la vida de verdad; la sonda
+  distingue un caso del otro.
+- Los scripts públicos de Break In 2 no leen el stat en ningún punto: solo
+  disparan y esperan. El lector de stat de VANTA es propio, y si el juego no lo
+  expone, la acción se informa sin afirmar que subió.
