@@ -9,7 +9,7 @@ fail=0
 line() { printf '%s\n' "────────────────────────────────────────────────────────"; }
 
 line
-echo "1. Sintaxis de los 17 módulos"
+echo "1. Sintaxis de los 13 módulos"
 line
 if python3 tools/tests/luacheck.py $(find src -name '*.lua' | sort) >/tmp/syntax.log 2>&1; then
     grep -c '^OK' /tmp/syntax.log | xargs printf '   %s archivos compilan\n'
